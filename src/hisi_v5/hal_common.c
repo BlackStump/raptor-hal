@@ -1059,6 +1059,12 @@ static void hisi_vi_vpss_mode(hisi_state_t *st)
         st->vi_all_online ? V5_VI_ONLINE_VPSS_ONLINE : V5_VI_ONLINE_VPSS_OFFLINE;
     v5_vi_vpss_mode mode;
     int ret;
+    {
+        /* local experiment: force the VI/VPSS coupling, 0 = both offline .. 3 = both online */
+        const char *ov = getenv("RSS_VI_COUPLING");
+        if (ov && ov[0] >= '0' && ov[0] <= '3' && ov[1] == '\0')
+            want = (v5_vi_vpss_mode_type)(ov[0] - '0');
+    }
 
     if (!st->sys.fnGetViVpssMode || !st->sys.fnSetViVpssMode) {
         HAL_LOG_DBG("vi: no ss_mpi_sys_get/set_vi_vpss_mode; leaving the coupling alone");
@@ -1951,6 +1957,15 @@ static unsigned int hisi_vb_vi_blk_cnt(unsigned long long blk_size, unsigned lon
     unsigned long long budget_kib;
     unsigned long long blk_kib;
     unsigned int cnt;
+
+    {
+        /* local experiment: RSS_VB_VI_BLKS=<2..6> forces the block count */
+        const char *ov = getenv("RSS_VB_VI_BLKS");
+        if (ov && ov[0] >= '2' && ov[0] <= '6' && ov[1] == '\0') {
+            HAL_LOG_INFO("vb: RSS_VB_VI_BLKS forces %c VI blocks", ov[0]);
+            return (unsigned int)(ov[0] - '0');
+        }
+    }
 
     if (!total_kib || !blk_size) {
         HAL_LOG_INFO("vb: MMZ size unknown, asking for the measured %u blocks", HISI_VB_VI_BLK_CNT);

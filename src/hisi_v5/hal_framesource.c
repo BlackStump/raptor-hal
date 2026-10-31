@@ -28,6 +28,7 @@
 #include <time.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 
 /*
  * The channel index rvd uses, checked and turned into the physical one.
@@ -181,6 +182,13 @@ static unsigned long long hisi_fs_pool_want(const hisi_state_t *st, const hisi_v
 
     want = hisi_vb_yuv_size(fs->width, fs->height, fs->compress_mode);
     common = hisi_vb_nv12_size(st->mode.dev_rect.width, st->mode.dev_rect.height);
+
+    {
+        /* local experiment: RSS_FS_POOL_MAX=<bytes> keeps bigger channels on the common pool */
+        const char *ov = getenv("RSS_FS_POOL_MAX");
+        if (ov && want > strtoull(ov, NULL, 10))
+            return 0;
+    }
 
     return want < common ? want : 0;
 }
@@ -396,6 +404,10 @@ static void hisi_fs_wrap_apply(hisi_state_t *st, int chn, hisi_vpss_chn_t *fs, b
     v5_vpss_chn_buf_wrap_attr w;
     int phy = hisi_vpss_phy(chn);
     int ret;
+
+    /* local experiment: RSS_NO_WRAP=1 keeps every channel off the wrap ring */
+    if (want && getenv("RSS_NO_WRAP"))
+        want = false;
 
     if (want && !hisi_fs_wrap_attr(st, chn, fs, &w))
         want = false;
