@@ -70,5 +70,7 @@
 #define HAL_HISILICON_SDK
 #define HAL_HISI_GEN5
 #else
-#error "No PLATFORM_* defined"
+/* Fullhan, and the unknown-platform #error from here on; chained the same way
+ * this file is chained off the SigmaStar one. */
+#include "hal_internal_fullhan.h"
 #endif

@@ -58,7 +58,7 @@
 
 /* Vendor selection: the non-Ingenic vendors are set above, Ingenic by
  * elimination. Each additional vendor adds one term here and nothing else. */
-#if !defined(HAL_SIGMASTAR_SDK) && !defined(HAL_HISILICON_SDK)
+#if !defined(HAL_SIGMASTAR_SDK) && !defined(HAL_HISILICON_SDK) && !defined(HAL_FULLHAN_SDK)
 #define HAL_INGENIC_SDK
 #endif
 
