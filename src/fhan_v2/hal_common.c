@@ -241,31 +241,68 @@ static void fh_check_exports(void)
  * CHIP IDENTIFICATION
  * ================================================================ */
 
+/* Copy one whitespace/comma-delimited token, upper-cased. */
+static void fh_copy_token(char *out, size_t out_size, const char *p)
+{
+    size_t n = 0;
+
+    while (*p == ' ' || *p == '\t' || *p == ':')
+        p++;
+    while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' && p[n] != ',' &&
+           n + 1 < out_size) {
+        char ch = p[n];
+
+        out[n] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 'a' + 'A') : ch;
+        n++;
+    }
+    out[n] = '\0';
+}
+
+/*
+ * The package name: /proc/cpuinfo's Hardware line first (the kernel's own
+ * board name, "FH8856V200" on the PB4), then any FH8 token in
+ * /proc/driver/chip. See fh_common.h for why the PMU registers are not used.
+ */
 static int fh_read_chip_name(char *out, size_t out_size)
 {
-    FILE *f = fopen(FH_CHIP_PROC, "r");
     char line[200];
-    int ret = RSS_ERR_NOENT;
+    FILE *f;
 
-    if (!f)
-        return RSS_ERR_NOENT;
+    f = fopen(FH_CPUINFO, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (!strncmp(line, "Hardware", 8)) {
+                char *p = strchr(line, ':');
 
-    while (fgets(line, sizeof(line), f)) {
-        char *p = strstr(line, "FH8");
-        size_t n = 0;
-
-        if (!p)
-            continue;
-        while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' && p[n] != ',' &&
-               n + 1 < out_size)
-            n++;
-        memcpy(out, p, n);
-        out[n] = '\0';
-        ret = RSS_OK;
-        break;
+                if (p) {
+                    fh_copy_token(out, out_size, p + 1);
+                    if (!strncmp(out, "FH8", 3)) {
+                        fclose(f);
+                        return RSS_OK;
+                    }
+                }
+            }
+        }
+        fclose(f);
     }
-    fclose(f);
-    return ret;
+
+    f = fopen(FH_CHIP_PROC, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            char *p = strstr(line, "FH8");
+
+            if (!p)
+                p = strstr(line, "fh8");
+            if (p) {
+                fh_copy_token(out, out_size, p);
+                fclose(f);
+                return RSS_OK;
+            }
+        }
+        fclose(f);
+    }
+
+    return RSS_ERR_NOENT;
 }
 
 /* The V200 die, any package: FH8852V2xx, FH8856V2xx, FH8858V2xx. */
@@ -392,31 +429,8 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
         goto err_free;
 
     if (fh_read_chip_name(st->chip_name, sizeof(st->chip_name)) != RSS_OK)
-        HAL_LOG_WARN("chip: %s unreadable", FH_CHIP_PROC);
-
-    {
-        fh_sys_ver ver;
-
-        memset(&ver, 0, sizeof(ver));
-        if (!st->sys.fnSysGetVersion(&ver))
-            snprintf(st->sdk_version, sizeof(st->sdk_version),
-                     "FH MPI date 0x%08x commit 0x%08x pkg 0x%08x", ver.date, ver.commit,
-                     ver.package);
-    }
-
-    HAL_LOG_INFO("sdk: %s", st->sdk_version[0] ? st->sdk_version : "version unavailable");
-
-    if (st->sys.fnSysGetChipId) {
-        unsigned int id = 0;
-
-        if (!st->sys.fnSysGetChipId(&id))
-            HAL_LOG_INFO("chip: %s (FH_SYS_GetChipID 0x%08x)",
-                         st->chip_name[0] ? st->chip_name : "unknown", id);
-        else
-            HAL_LOG_INFO("chip: %s", st->chip_name[0] ? st->chip_name : "unknown");
-    } else {
-        HAL_LOG_INFO("chip: %s", st->chip_name[0] ? st->chip_name : "unknown");
-    }
+        HAL_LOG_WARN("chip: no FH8 name in %s or %s", FH_CPUINFO, FH_CHIP_PROC);
+    HAL_LOG_INFO("chip: %s", st->chip_name[0] ? st->chip_name : "unknown");
 
     ret = st->sys.fnSysInit();
     if (ret) {
@@ -425,6 +439,32 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
         goto err_unload;
     }
     st->sys_inited = true;
+
+    /*
+     * Asked after FH_SYS_Init, not before: before it, the first bench run
+     * (2026-11-05) got no version back, while libdsp prints its own version
+     * during init. Raw words logged until the layouts are read.
+     */
+    {
+        unsigned int w[FH_PROBE_WORDS];
+        int rc;
+
+        memset(w, 0, sizeof(w));
+        rc = st->sys.fnSysGetVersion(w);
+        HAL_LOG_INFO("probe: FH_SYS_GetVersion rc=%d words %08x %08x %08x %08x %08x %08x", rc,
+                     w[0], w[1], w[2], w[3], w[4], w[5]);
+        if (!rc)
+            snprintf(st->sdk_version, sizeof(st->sdk_version),
+                     "FH MPI %08x %08x pkg %08x", w[0], w[1], w[2]);
+
+        if (st->sys.fnSysGetChipId) {
+            memset(w, 0, sizeof(w));
+            rc = st->sys.fnSysGetChipId(w);
+            HAL_LOG_INFO("probe: FH_SYS_GetChipID rc=%d words %08x %08x %08x %08x", rc, w[0],
+                         w[1], w[2], w[3]);
+        }
+    }
+    HAL_LOG_INFO("sdk: %s", st->sdk_version[0] ? st->sdk_version : "version unavailable");
 
     HAL_LOG_INFO("hal_init: SDK up to FH_SYS_Init; the pipeline is not implemented yet (Phase 2)");
 
@@ -617,17 +657,17 @@ void rss_hal_check_platform(const char *name)
     char chip[24];
 
     if (fh_read_chip_name(chip, sizeof(chip)) != RSS_OK) {
-        HAL_LOG_WARN("platform check: %s unreadable, assuming %s", FH_CHIP_PROC,
-                     HAL_PLATFORM_NAME);
+        HAL_LOG_WARN("platform check: no FH8 name in %s or %s, assuming %s", FH_CPUINFO,
+                     FH_CHIP_PROC, HAL_PLATFORM_NAME);
         return;
     }
 
     if (!fh_chip_is_v2(chip)) {
-        fprintf(stderr, "FATAL: built for %s (FH885xV200) but %s reports '%s'\n",
-                HAL_PLATFORM_NAME, FH_CHIP_PROC, chip);
+        fprintf(stderr, "FATAL: built for %s (FH885xV200) but the board reports '%s'\n",
+                HAL_PLATFORM_NAME, chip);
         openlog(name ? name : "raptor", LOG_PID, LOG_DAEMON);
-        syslog(LOG_ERR, "FATAL: built for %s (FH885xV200) but %s reports '%s'",
-               HAL_PLATFORM_NAME, FH_CHIP_PROC, chip);
+        syslog(LOG_ERR, "FATAL: built for %s (FH885xV200) but the board reports '%s'",
+               HAL_PLATFORM_NAME, chip);
         closelog();
         _exit(1);
     }

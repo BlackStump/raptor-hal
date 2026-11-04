@@ -40,18 +40,32 @@
 #define FH_LIB_VMM "libvmm.so"
 #define FH_LIB_DSP "libdsp.so"
 
-/* /proc/driver/chip names the package on every Fullhan kernel seen so far
- * ("FH8856V200" on the PB4). divinus prefers the PMU registers at 0xf0000000;
- * the PB4's package id 0x7850b is not in its table and it falls back to
- * this file, so this backend starts here. */
+/*
+ * Where the package name comes from, measured on M2 (upstream OpenIPC kernel,
+ * 2026-11-05):
+ *
+ *   /proc/cpuinfo      "Hardware        : FH8856V200"      <- used first
+ *   /proc/driver/chip  exists, but holds no "FH8..." token this backend found
+ *   PMU 0xf0000000     0x19112201  (the V200 die id)
+ *   PMU 0xf0000004     0x0007850b  (ip version; divinus wants 0xc/0xd in the
+ *                                   low nibble, this board has 0xb)
+ *   PMU 0xf000000c     0x11000001  (& 0xffffff = 0x000001, which divinus's
+ *                                   table decodes as FH8852V200 -- wrong for
+ *                                   this FH8856V200 board)
+ *
+ * So the PMU package field does not identify the part here, and this backend
+ * does not decode it. cpuinfo is the kernel's own board name.
+ */
+#define FH_CPUINFO "/proc/cpuinfo"
 #define FH_CHIP_PROC "/proc/driver/chip"
 
-/* FH_SYS_GetVersion (libdsp). Layout from divinus f2_sys.h -- unverified. */
-typedef struct {
-    unsigned int date;
-    unsigned int commit; /* git hash */
-    unsigned int package;
-    unsigned int reserved;
-} fh_sys_ver;
+/*
+ * FH_SYS_GetVersion / FH_SYS_GetChipID (libdsp). Both are exported; neither
+ * layout is verified yet. divinus passes a four-word struct to GetVersion and
+ * an unsigned int * to GetChipID. Until the libraries are read, both are
+ * called with an oversized zeroed buffer and the raw words are logged, so a
+ * wrong guess costs a log line rather than a stack.
+ */
+#define FH_PROBE_WORDS 16
 
 #endif /* FH_COMMON_H */

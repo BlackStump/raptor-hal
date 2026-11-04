@@ -15,8 +15,8 @@ typedef struct {
 
     int (*fnSysInit)(void);
     int (*fnSysExit)(void);
-    int (*fnSysGetVersion)(fh_sys_ver *ver);
-    int (*fnSysGetChipId)(unsigned int *id); /* optional */
+    int (*fnSysGetVersion)(void *ver);
+    int (*fnSysGetChipId)(void *id); /* optional */
 } fh_sys_impl;
 
 typedef struct {
