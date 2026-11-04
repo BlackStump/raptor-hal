@@ -467,12 +467,9 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
             snprintf(st->sdk_version, sizeof(st->sdk_version),
                      "FH MPI %08x %08x pkg %08x", w[0], w[1], w[2]);
 
-        if (st->sys.fnSysGetChipId) {
-            memset(w, 0, sizeof(w));
-            rc = st->sys.fnSysGetChipId(w);
-            HAL_LOG_INFO("probe: FH_SYS_GetChipID rc=%d words %08x %08x %08x %08x", rc, w[0],
-                         w[1], w[2], w[3]);
-        }
+        /* FH_SYS_GetChipID is not called: on this kernel it fails
+         * (0xa1014007) and the chip driver logs "Error: unknown chip" for
+         * package 0x7850b every time. /proc/cpuinfo names the part. */
     }
     HAL_LOG_INFO("sdk: %s", st->sdk_version[0] ? st->sdk_version : "version unavailable");
 

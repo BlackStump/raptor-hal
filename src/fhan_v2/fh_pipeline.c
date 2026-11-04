@@ -483,7 +483,14 @@ int fh_pipe_start(fh_state_t *st)
     if (rc)
         return rc;
 
-    FH_STEP(p->fnSnrCreate(), "Sensor_Create");
+    {
+        void *obj = p->fnSnrCreate();
+
+        HAL_LOG_INFO("sensor: Sensor_Create -> %p (sensor table %s_sensor_if at %p)", obj,
+                     st->snr_lib, p->snr_ops);
+        if (!obj)
+            HAL_LOG_WARN("sensor: Sensor_Create returned NULL; continuing as divinus does");
+    }
     st->snr_created = true;
 
     FH_STEP(p->fnIspMemInit(vi.width, vi.height), "API_ISP_MemInit");

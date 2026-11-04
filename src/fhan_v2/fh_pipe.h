@@ -82,7 +82,9 @@ typedef struct {
 
     /* sensor library */
     void *snr_ops; /* <lib>_sensor_if, opaque, handed to API_ISP_SensorRegCb */
-    int (*fnSnrCreate)(void);
+    /* Returns the driver's object pointer, not a status (bench, 2026-11-05:
+     * 0xb695a740 one run, 0xb699a740 the next). divinus ignores it. */
+    void *(*fnSnrCreate)(void);
     int (*fnSnrDestroy)(void);
 } fh_pipe_impl;
 
