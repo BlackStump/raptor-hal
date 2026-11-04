@@ -369,6 +369,9 @@ fail:
 
 static void fh_teardown(fh_state_t *st)
 {
+#ifdef HAL_MODULE_VIDEO
+    fh_pipe_stop(st);
+#endif
     if (st->sys_inited) {
         int rc = st->sys.fnSysExit();
 
@@ -432,6 +435,13 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
         HAL_LOG_WARN("chip: no FH8 name in %s or %s", FH_CPUINFO, FH_CHIP_PROC);
     HAL_LOG_INFO("chip: %s", st->chip_name[0] ? st->chip_name : "unknown");
 
+#ifdef HAL_MODULE_VIDEO
+    /* Phase 2a: the drivers take their buffer sizes before the SDK starts. */
+    ret = fh_pipe_prepare(st, &cfg->sensors[0]);
+    if (ret)
+        goto err_unload;
+#endif
+
     ret = st->sys.fnSysInit();
     if (ret) {
         HAL_LOG_ERR("sys: FH_SYS_Init failed %d (0x%x)", ret, (unsigned)ret);
@@ -466,7 +476,14 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
     }
     HAL_LOG_INFO("sdk: %s", st->sdk_version[0] ? st->sdk_version : "version unavailable");
 
-    HAL_LOG_INFO("hal_init: SDK up to FH_SYS_Init; the pipeline is not implemented yet (Phase 2)");
+#ifdef HAL_MODULE_VIDEO
+    ret = fh_pipe_start(st);
+    if (ret)
+        goto err_unload;
+    HAL_LOG_INFO("hal_init: sensor and ISP up; framesources and encoders are Phase 2b");
+#else
+    HAL_LOG_INFO("hal_init: SDK up to FH_SYS_Init");
+#endif
 
     g_fh = st;
     c->initialized = true;
@@ -548,6 +565,10 @@ static const rss_hal_ops_t g_ops = {
     .sys_get_cpu_info = hal_sys_get_cpu_info,
 
 #ifdef HAL_MODULE_VIDEO
+    .isp_get_sensor_attr = hal_isp_get_sensor_attr,
+    .isp_get_sensor_fps = hal_isp_get_sensor_fps,
+    .isp_set_sensor_fps = hal_isp_set_sensor_fps,
+
     .gpio_set = hal_gpio_set,
     .gpio_get = hal_gpio_get,
     .ircut_set = hal_ircut_set,
