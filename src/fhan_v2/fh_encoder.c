@@ -15,11 +15,13 @@
  * hands out its head. divinus's own delivery thread copies every frame
  * too, so the copy costs nothing it did not already pay.
  *
- * RATE CONTROL. H.264 "CBR" is a fixed quantizer chosen from the bitrate,
- * because -- per the divinus commit that measured it (Sergey Novak, "fix
- * FH8852 rate control") -- the FH8852 H.264 CBR loop ignores its target;
- * the FH8856 is the same die. 38 at 1 Mbps, 36 at 2, 34 at 4, 32 at 8,
- * never below 30. H.265 keeps the driver's CBR. rc_mode fixqp uses init_qp.
+ * RATE CONTROL. CBR is the driver's CBR for both codecs. divinus 2c0a8bc
+ * replaces H.264 CBR with a fixed quantizer, reporting that the FH8852's
+ * loop ignores its target; a fixed quantizer has no ceiling at all, and on
+ * the bench it produced 1.75 MB frames from a dark, noisy scene. So CBR is
+ * CBR here, and the collector logs each channel's real bitrate every 10 s
+ * to show whether the loop holds. rc_mode fixqp keeps Sergey's mapping
+ * (38 at 1 Mbps .. 32 at 8, never below 30) when init_qp is not given.
  *
  * JPEG. Every JPEG-class channel is a continuously running MJPEG channel at
  * the snapshot rate, divinus's MJPEG attribute; rvd starts and stops it.
@@ -280,6 +282,9 @@ static void *fh_collect_thread(void *arg)
     int64_t last_drop_log = 0, last_bad_log = 0, last_wrap_log = 0;
     unsigned int bad_frames = 0, wrap_frames = 0;
     uintptr_t map_lo = 0, map_hi = 0;
+    unsigned long long win_bytes[FH_VENC_CHN_MAX] = {0};
+    unsigned int win_frames[FH_VENC_CHN_MAX] = {0}, win_max[FH_VENC_CHN_MAX] = {0};
+    int64_t win_start = fh_now_us();
 
     HAL_LOG_INFO("venc: collector thread tid %ld", syscall(SYS_gettid));
 
@@ -415,6 +420,34 @@ static void *fh_collect_thread(void *arg)
 
         st->pipe.fnVencRelease(strm.field04);
         pthread_cond_broadcast(&st->enc_cond);
+
+        /* What the encoder actually produces, per channel, every 10 s. */
+        if (chn < FH_VENC_CHN_MAX && strm.field10) {
+            win_bytes[chn] += strm.field10;
+            win_frames[chn]++;
+            if (strm.field10 > win_max[chn])
+                win_max[chn] = strm.field10;
+        }
+        {
+            int64_t now = fh_now_us();
+
+            if (now - win_start >= 10000000) {
+                unsigned int c;
+
+                for (c = 0; c < FH_VENC_CHN_MAX; c++) {
+                    if (!win_frames[c])
+                        continue;
+                    HAL_LOG_INFO("venc chn %u: %llu kbit/s, %u frames, largest %u bytes "
+                                 "(target %u kbit/s)",
+                                 c, win_bytes[c] * 8u / (unsigned long long)((now - win_start) / 1000),
+                                 win_frames[c], win_max[c], st->enc[c].bitrate / 1000u);
+                    win_bytes[c] = 0;
+                    win_frames[c] = 0;
+                    win_max[c] = 0;
+                }
+                win_start = now;
+            }
+        }
 
         /* A dropped H.26x frame is a hole in the reference chain; ask for a
          * keyframe so the stream heals at the next GOP's worth of time
@@ -645,24 +678,34 @@ static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
         return;
     }
 
-    if (!h265) {
-        unsigned int qp;
+    if (enc->rc_mode == RSS_RC_FIXQP) {
+        unsigned int qp = enc->init_qp >= 0 ? (unsigned int)enc->init_qp
+                                            : fh_h264_qp_for(enc->bitrate);
 
-        if (enc->rc_mode == RSS_RC_FIXQP && enc->init_qp >= 0)
-            qp = (unsigned int)enc->init_qp;
-        else
-            qp = fh_h264_qp_for(enc->bitrate);
-        rc->mode = FH_RC_H264FIXQP;
-        rc->param[0] = qp;
-        rc->param[1] = qp;
-        rc->param[2] = frw;
-        HAL_LOG_INFO("venc chn %d: H.264 at fixed QP %u (%s %u kbps; the V200's H.264 CBR "
-                     "ignores its target)",
-                     chn, qp, enc->rc_mode == RSS_RC_FIXQP ? "fixqp," : "asked for", kbps);
-        return;
+        if (h265) {
+            HAL_LOG_WARN("venc chn %d: no fixed-QP mode for H.265 here; using CBR", chn);
+        } else {
+            rc->mode = FH_RC_H264FIXQP;
+            rc->param[0] = qp;
+            rc->param[1] = qp;
+            rc->param[2] = frw;
+            HAL_LOG_INFO("venc chn %d: H.264 at fixed QP %u", chn, qp);
+            return;
+        }
     }
 
-    rc->mode = FH_RC_H265CBR;
+    /*
+     * CBR, for both codecs, with the vendor's own CBR layout (divinus
+     * f2_venc.h). Not the fixed-QP stand-in divinus 2c0a8bc uses for H.264:
+     * bench, 2026-11-05, with the lens covered under the night tuning, a
+     * fixed QP 35 turned sensor noise into 1.75 MB frames -- ~350 Mbit/s,
+     * more than half the encoder's stream buffer per frame. A bitrate cap
+     * the encoder actually enforces is the only thing that stops that;
+     * whether the V200's H.264 loop enforces it is what the per-channel
+     * bitrate log measures.
+     */
+    rc->mode = h265 ? FH_RC_H265CBR : FH_RC_H264CBR;
+    HAL_LOG_INFO("venc chn %d: %s CBR %u kbps", chn, h265 ? "H.265" : "H.264", kbps);
     rc->param[0] = 35;
     rc->param[1] = kbps << 10;
     rc->param[2] = frw;
