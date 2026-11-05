@@ -155,6 +155,7 @@ typedef struct {
     int (*fnVencSetAttr)(unsigned int chn, void *attr);
     int (*fnVencSetRc)(unsigned int chn, fh_venc_rc *rc);
     int (*fnVencGetRc)(unsigned int chn, void *rc); /* optional, logged after set */
+    int (*fnVencGetAttr)(unsigned int chn, void *attr); /* optional, diagnostic */
     int (*fnVencStart)(unsigned int chn);
     int (*fnVencStop)(unsigned int chn);
 

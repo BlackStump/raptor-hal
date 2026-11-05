@@ -941,6 +941,33 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
             return RSS_ERR_IO;
         }
         enc->made = true;
+
+        /*
+         * Diagnostic: the driver's own defaults for a fresh channel, before
+         * this backend writes anything. H.264 and H.265 CBR ignore both the
+         * bitrate and the QP bounds as divinus lays them out (bench,
+         * 2026-11-05), and VBR's layout is rejected outright, so the
+         * vendor's defaults are the best evidence of the real layout.
+         */
+        {
+            unsigned int *d = (unsigned int *)calloc(512, sizeof(unsigned int));
+
+            if (d) {
+                if (st->pipe.fnVencGetAttr && !st->pipe.fnVencGetAttr((unsigned)chn, d))
+                    HAL_LOG_INFO("venc chn %d: default attr: %u %u %u %u %u | %u %u %u %u %u %u "
+                                 "%u %u | rc %u: %u %u %u %u %u %u %u %u %u %u %u %u",
+                                 chn, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
+                                 d[10], d[11], d[12], d[21], d[22], d[23], d[24], d[25], d[26],
+                                 d[27], d[28], d[29], d[30], d[31], d[32], d[33]);
+                memset(d, 0, 512 * sizeof(unsigned int));
+                if (st->pipe.fnVencGetRc && !st->pipe.fnVencGetRc((unsigned)chn, d))
+                    HAL_LOG_INFO("venc chn %d: default RC: %u | %u %u %u %u %u %u %u %u %u %u %u "
+                                 "%u %u %u %u %u",
+                                 chn, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
+                                 d[10], d[11], d[12], d[13], d[14], d[15], d[16]);
+                free(d);
+            }
+        }
         enc->made_w = enc->width;
         enc->made_h = enc->height;
     } else if (enc->width > enc->made_w || enc->height > enc->made_h) {

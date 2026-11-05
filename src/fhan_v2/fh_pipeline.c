@@ -266,6 +266,7 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(dsp, "libdsp", p->fnVencSetAttr, "FH_VENC_SetChnAttr", true);
     FH_SYM(dsp, "libdsp", p->fnVencSetRc, "FH_VENC_SetRCAttr", true);
     FH_SYM(dsp, "libdsp", p->fnVencGetRc, "FH_VENC_GetRCAttr", false);
+    FH_SYM(dsp, "libdsp", p->fnVencGetAttr, "FH_VENC_GetChnAttr", false);
     FH_SYM(dsp, "libdsp", p->fnVencStart, "FH_VENC_StartRecvPic", true);
     FH_SYM(dsp, "libdsp", p->fnVencStop, "FH_VENC_StopRecvPic", true);
 
