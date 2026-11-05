@@ -658,6 +658,26 @@ static unsigned int fh_h264_qp_for(uint32_t bitrate_bps)
     return qp < 30 ? 30u : (unsigned int)qp;
 }
 
+/*
+ * The bitrate word's unit. divinus writes kbps << 10. Bench, 2026-11-05:
+ * with that, CBR held 126-530 kbit/s against a 4000 target on a static lit
+ * scene (and 11-45 against 1000 on the sub-stream) -- the picture visibly
+ * blocky -- so the unit is in doubt. FH_RC_UNITS in rvd's environment
+ * picks another for the bench: "bps" (bits/s), "kbps" (kbit/s); unset is
+ * kbps << 10.
+ */
+static unsigned int fh_rate_word(uint32_t bitrate_bps)
+{
+    const char *u = getenv("FH_RC_UNITS");
+    unsigned int kbps = bitrate_bps ? bitrate_bps / 1000u : 1024u;
+
+    if (u && !strcmp(u, "bps"))
+        return bitrate_bps ? bitrate_bps : 1024000u;
+    if (u && !strcmp(u, "kbps"))
+        return kbps;
+    return kbps << 10;
+}
+
 static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
 {
     bool h265 = enc->codec == RSS_CODEC_H265;
@@ -670,7 +690,7 @@ static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
     if (enc->rc_mode == RSS_RC_VBR) {
         rc->mode = h265 ? FH_RC_H265VBR : FH_RC_H264VBR;
         rc->param[0] = 35;
-        rc->param[1] = kbps << 10;
+        rc->param[1] = fh_rate_word(enc->bitrate);
         rc->param[2] = frw;
         rc->param[3] = 51;
         rc->param[6] = 5;
@@ -707,7 +727,7 @@ static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
     rc->mode = h265 ? FH_RC_H265CBR : FH_RC_H264CBR;
     HAL_LOG_INFO("venc chn %d: %s CBR %u kbps", chn, h265 ? "H.265" : "H.264", kbps);
     rc->param[0] = 35;
-    rc->param[1] = kbps << 10;
+    rc->param[1] = fh_rate_word(enc->bitrate);
     rc->param[2] = frw;
     rc->param[3] = 50;
     rc->param[4] = 35;
@@ -789,6 +809,15 @@ static int fh_enc_apply(fh_state_t *st, int chn, fh_enc_chn_t *enc)
         if (rc) {
             HAL_LOG_ERR("venc chn %d: FH_VENC_SetRCAttr 0x%x", chn, (unsigned)rc);
             return RSS_ERR_IO;
+        }
+        if (st->pipe.fnVencGetRc) {
+            unsigned int back[64];
+
+            memset(back, 0, sizeof(back));
+            if (!st->pipe.fnVencGetRc((unsigned)chn, back))
+                HAL_LOG_INFO("venc chn %d: RC as stored: %u | %u %u %u %u %u %u %u %u %u %u %u %u",
+                             chn, back[0], back[1], back[2], back[3], back[4], back[5], back[6],
+                             back[7], back[8], back[9], back[10], back[11], back[12]);
         }
         HAL_LOG_INFO("venc chn %d: %s %ux%u profile %u gop %u", chn,
                      enc->codec == RSS_CODEC_H265 ? "H.265" : "H.264", enc->width, enc->height,

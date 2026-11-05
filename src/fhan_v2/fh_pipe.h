@@ -154,6 +154,7 @@ typedef struct {
     int (*fnVencRequestIdr)(unsigned int chn);
     int (*fnVencSetAttr)(unsigned int chn, void *attr);
     int (*fnVencSetRc)(unsigned int chn, fh_venc_rc *rc);
+    int (*fnVencGetRc)(unsigned int chn, void *rc); /* optional, logged after set */
     int (*fnVencStart)(unsigned int chn);
     int (*fnVencStop)(unsigned int chn);
 
@@ -176,6 +177,8 @@ typedef struct {
     int (*fnIspGetAeDefaultCfg)(void *cfg); /* saved after the day tuning */
     int (*fnIspSetAeDefaultCfg)(void *cfg); /* restored after the night one */
     int (*fnIspSetAeInfo)(void *info);      /* AE operating point, across a swap */
+    int (*fnIspGetSaturation)(void *sat);   /* night greyscale */
+    int (*fnIspSetSaturation)(void *sat);
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
 

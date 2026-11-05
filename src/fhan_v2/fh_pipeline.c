@@ -265,6 +265,7 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(dsp, "libdsp", p->fnVencRequestIdr, "FH_VENC_RequestIDR", true);
     FH_SYM(dsp, "libdsp", p->fnVencSetAttr, "FH_VENC_SetChnAttr", true);
     FH_SYM(dsp, "libdsp", p->fnVencSetRc, "FH_VENC_SetRCAttr", true);
+    FH_SYM(dsp, "libdsp", p->fnVencGetRc, "FH_VENC_GetRCAttr", false);
     FH_SYM(dsp, "libdsp", p->fnVencStart, "FH_VENC_StartRecvPic", true);
     FH_SYM(dsp, "libdsp", p->fnVencStop, "FH_VENC_StopRecvPic", true);
 
@@ -286,6 +287,8 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeDefaultCfg, "API_ISP_GetAeDefaultCfg", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspSetAeDefaultCfg, "API_ISP_SetAeDefaultCfg", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspSetAeInfo, "API_ISP_SetAeInfo", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetSaturation, "API_ISP_GetSaturation", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspSetSaturation, "API_ISP_SetSaturation", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
 
@@ -970,8 +973,28 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
         rc = fh_tuning_load(st, path);
         if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
             st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
-        if (mode == RSS_ISP_NIGHT)
+        if (mode == RSS_ISP_NIGHT) {
             fh_day_ae_restore(st);
+            /*
+             * Greyscale at night, divinus's way: an all-zero saturation
+             * record. Bench, 2026-11-05: forced night in a lit room came out
+             * pink -- with the IR-cut filter out the night tuning still
+             * renders colour. The day file's load puts its own saturation
+             * back. 1 KiB of zeros because the record's size is unknown.
+             */
+            if (st->pipe.fnIspSetSaturation) {
+                unsigned char *z = (unsigned char *)calloc(1, 1024);
+
+                if (z) {
+                    int r = st->pipe.fnIspSetSaturation(z);
+
+                    if (r)
+                        HAL_LOG_WARN("isp: night greyscale (SetSaturation) failed 0x%x",
+                                     (unsigned)r);
+                    free(z);
+                }
+            }
+        }
         if (have_ae) {
             int r2 = st->pipe.fnIspSetAeInfo(ae);
 
