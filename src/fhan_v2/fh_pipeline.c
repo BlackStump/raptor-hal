@@ -283,6 +283,9 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeInfo, "API_ISP_GetAeInfo", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeInfo2, "API_ISP_GetAeInfo2", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeStatus, "API_ISP_GetAeStatus", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetAeDefaultCfg, "API_ISP_GetAeDefaultCfg", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetAlgCtrl, "API_ISP_GetAlgCtrl", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetAeRouteCfg, "API_ISP_GetAeRouteCfg", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
 
@@ -460,6 +463,73 @@ static void fh_isp_sample_ae(fh_state_t *st)
                      "exposure x gain %u",
                      w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, st->exp_gain);
     }
+}
+
+
+/*
+ * fh_cfg_dump -- diagnostic: what a tuning load changes in the AE setup.
+ *
+ * Bench, 2026-11-05: after the night tuning loads, the AE stops -- exposure
+ * and gain frozen at the file's values whether the room is lit or the lens
+ * covered. Three readbacks that could hold the switch: the AE default
+ * config, the algorithm-control word(s), and the AE route. Each is read
+ * into a 16 KiB zeroed heap buffer (their sizes are unknown, and a struct
+ * larger than the buffer would overrun it) after every tuning load, with
+ * the 3A loop gated, and the words that differ from the previous load are
+ * logged.
+ */
+static void fh_cfg_dump_one(const char *name, int (*fn)(void *), unsigned int *prev, bool *have,
+                            const char *tag)
+{
+    unsigned int *cur;
+    char line[400];
+    size_t len = 0;
+    int rc, i, last = -1, shown = 0;
+
+    if (!fn)
+        return;
+    cur = (unsigned int *)calloc(4096, sizeof(unsigned int));
+    if (!cur)
+        return;
+    rc = fn(cur);
+    for (i = 0; i < 1024; i++)
+        if (cur[i])
+            last = i;
+    for (i = 1024; i < 4096; i++)
+        if (cur[i]) {
+            HAL_LOG_WARN("cfgdump %s: wrote past 4 KiB (word %d); comparing the first 1024", name,
+                         i);
+            break;
+        }
+
+    line[0] = 0;
+    for (i = 0; i <= last && shown < 24; i++) {
+        if (*have ? cur[i] == prev[i] : !cur[i])
+            continue;
+        if (*have)
+            len += (size_t)snprintf(line + len, sizeof(line) - len, " [%d]%u->%u", i, prev[i],
+                                    cur[i]);
+        else
+            len += (size_t)snprintf(line + len, sizeof(line) - len, " [%d]%u", i, cur[i]);
+        shown++;
+        if (len >= sizeof(line) - 24)
+            break;
+    }
+    HAL_LOG_INFO("cfgdump %s %s: rc=%d, %d words%s%s", tag, name, rc, last + 1,
+                 *have ? (shown ? ", changed:" : ", unchanged") : ", nonzero:", line);
+    memcpy(prev, cur, 1024 * sizeof(unsigned int));
+    *have = true;
+    free(cur);
+}
+
+static void fh_cfg_dump(fh_state_t *st, const char *tag)
+{
+    static unsigned int p_ae[1024], p_alg[1024], p_route[1024];
+    static bool h_ae, h_alg, h_route;
+
+    fh_cfg_dump_one("AeDefaultCfg", st->pipe.fnIspGetAeDefaultCfg, p_ae, &h_ae, tag);
+    fh_cfg_dump_one("AlgCtrl", st->pipe.fnIspGetAlgCtrl, p_alg, &h_alg, tag);
+    fh_cfg_dump_one("AeRouteCfg", st->pipe.fnIspGetAeRouteCfg, p_route, &h_route, tag);
 }
 
 static void *fh_isp_thread(void *arg)
@@ -726,6 +796,8 @@ int fh_pipe_start(fh_state_t *st)
     if ((st->mirror || st->flip) && p->fnIspSetMirrorAndflipEx)
         p->fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
 
+    fh_cfg_dump(st, "boot-day");
+
     if (!st->exp_lock_ready) {
         if (pthread_mutex_init(&st->exp_lock, NULL))
             return RSS_ERR_IO;
@@ -954,6 +1026,7 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
     rc = fh_tuning_load(st, path);
     if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
         st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
+    fh_cfg_dump(st, mode == RSS_ISP_NIGHT ? "night" : "day");
 
     __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);
     fh_sleep_ms(200);
