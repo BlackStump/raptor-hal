@@ -970,8 +970,22 @@ static void fh_colour_set(fh_state_t *st, bool colour)
         if (!grey)
             return;
         memcpy(grey, fh_sat_day, 1024);
-        grey[6] = 0;
-        grey[7] = 0;
+        /* Bench switch: which record bytes to clear, e.g. FH_GREY_CLEAR=6
+         * or =7 or =6,7 (default). The first try cleared both and came
+         * out grey but with lifted blacks and little contrast. */
+        {
+            const char *e = getenv("FH_GREY_CLEAR");
+            char buf[32];
+            char *tok, *save = NULL;
+
+            snprintf(buf, sizeof(buf), "%s", e ? e : "6,7");
+            for (tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+                int i = atoi(tok);
+
+                if (i >= 0 && i < 64)
+                    grey[i] = 0;
+            }
+        }
         rc = st->pipe.fnIspSetSaturation(grey);
         free(grey);
         if (rc)
