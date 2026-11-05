@@ -392,6 +392,28 @@ static void fh_isp_sample_ae(fh_state_t *st)
     st->exp_valid = true;
     pthread_mutex_unlock(&st->exp_lock);
 
+    /*
+     * Trace (bench, 2026-11-05): ric switched to day with the lens still
+     * covered, which needs the reported gain to fall below a quarter of its
+     * settled night value. Log every reading whose gain or luma moved by
+     * more than a fifth since the last one logged, with the raw words, to
+     * see what the AE actually does under each tuning.
+     */
+    {
+        static uint32_t last_gain, last_luma;
+        uint32_t g = w[2] >> 12, l = (uint32_t)luma;
+        bool moved = !last_gain || g * 5 > last_gain * 6 || g * 6 < last_gain * 5 ||
+                     (l > last_luma ? l - last_luma : last_luma - l) * 5 > last_luma + 5;
+
+        if (moved) {
+            HAL_LOG_INFO("ae: luma %u gain %u | %u %u %u %u %u %u %u %u %u (%s)", l, g, w[0], w[1],
+                         w[2], w[3], w[4], w[5], w[6], w[7], w[8],
+                         st->isp_mode == RSS_ISP_NIGHT ? "night" : "day");
+            last_gain = g;
+            last_luma = l;
+        }
+    }
+
     if (!st->exp_logged) {
         st->exp_logged = true;
         HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, gain %u", w[0],
