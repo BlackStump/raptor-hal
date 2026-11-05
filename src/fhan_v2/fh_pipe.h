@@ -175,6 +175,7 @@ typedef struct {
     int (*fnIspGetAeStatus)(void *info); /* optional, probed only */
     int (*fnIspGetAeDefaultCfg)(void *cfg); /* saved after the day tuning */
     int (*fnIspSetAeDefaultCfg)(void *cfg); /* restored after the night one */
+    int (*fnIspSetAeInfo)(void *info);      /* AE operating point, across a swap */
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
 

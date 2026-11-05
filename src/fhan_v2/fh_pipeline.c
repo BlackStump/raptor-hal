@@ -285,6 +285,7 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeStatus, "API_ISP_GetAeStatus", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeDefaultCfg, "API_ISP_GetAeDefaultCfg", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspSetAeDefaultCfg, "API_ISP_SetAeDefaultCfg", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspSetAeInfo, "API_ISP_SetAeInfo", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
 
@@ -948,11 +949,37 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
          waited += 10)
         fh_sleep_ms(10);
 
-    rc = fh_tuning_load(st, path);
-    if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
-        st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
-    if (mode == RSS_ISP_NIGHT)
-        fh_day_ae_restore(st);
+    /*
+     * Carry the AE's operating point across the load. Bench, 2026-11-05: a
+     * tuning load restarts the AE from the file's stored exposure, and in a
+     * lit room the first seconds after the day file loaded read luma 2 --
+     * ric's day check, 3 s after the switch, took that for darkness and
+     * reverted. Reading the exposure/gain before the load and writing it
+     * back after lets the picture continue where it was; the AE carries on
+     * from there under the new tuning.
+     */
+    {
+        unsigned int ae[64];
+        bool have_ae = false;
+
+        memset(ae, 0, sizeof(ae));
+        if (st->pipe.fnIspGetAeInfo && st->pipe.fnIspSetAeInfo && !st->pipe.fnIspGetAeInfo(ae) &&
+            ae[0])
+            have_ae = true;
+
+        rc = fh_tuning_load(st, path);
+        if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
+            st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
+        if (mode == RSS_ISP_NIGHT)
+            fh_day_ae_restore(st);
+        if (have_ae) {
+            int r2 = st->pipe.fnIspSetAeInfo(ae);
+
+            HAL_LOG_INFO("isp: AE point carried across the load: %u %u %u %u (rc %d)", ae[0],
+                        ae[1], ae[2], ae[3], r2);
+        }
+        memset(st->luma_hist, 0, sizeof(st->luma_hist));
+    }
 
     __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);
     fh_sleep_ms(200);
