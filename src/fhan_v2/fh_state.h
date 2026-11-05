@@ -93,7 +93,7 @@ typedef struct {
      * read by hal_isp_get_exposure under exp_lock. */
     pthread_mutex_t exp_lock;
     bool exp_lock_ready, exp_valid;
-    uint32_t exp_luma, exp_gain;
+    uint32_t exp_luma, exp_gain, exp_time;
     int64_t exp_next_us;
     bool isp_thread_started;
 #endif

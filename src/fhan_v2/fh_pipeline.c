@@ -386,11 +386,27 @@ static void fh_isp_sample_ae(fh_state_t *st)
     if (luma > 255)
         luma = 255;
 
-    pthread_mutex_lock(&st->exp_lock);
-    st->exp_luma = (uint32_t)luma;
-    st->exp_gain = w[2] >> 12;
-    st->exp_valid = true;
-    pthread_mutex_unlock(&st->exp_lock);
+    /*
+     * "Gain" for ric is the exposure-gain product, not the analog gain
+     * alone. The gain word bottoms out at 1x (1024) in any lit scene and
+     * the day tuning tops out at 4x, so gain alone spans 4:1 -- and ric's
+     * night->day rule (below 25% of the night baseline) then needs the
+     * gain to fall *below* 1x, which it cannot. Word 1 (exposure, 24000 at
+     * the day tuning's ceiling, 6560-23088 lit, 965534 under the night
+     * tuning's long exposure) times the gain spans more than 500:1 across
+     * the bench readings: 6560 lit, 96000 covered by day, ~3.9M covered by
+     * night. That is the quantity the AE actually trades against light.
+     */
+    {
+        unsigned long long prod = ((unsigned long long)w[1] * (w[2] >> 12)) >> 10;
+
+        pthread_mutex_lock(&st->exp_lock);
+        st->exp_luma = (uint32_t)luma;
+        st->exp_gain = prod > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)prod;
+        st->exp_time = w[1];
+        st->exp_valid = true;
+        pthread_mutex_unlock(&st->exp_lock);
+    }
 
     /*
      * Trace (bench, 2026-11-05): ric switched to day with the lens still
@@ -401,12 +417,12 @@ static void fh_isp_sample_ae(fh_state_t *st)
      */
     {
         static uint32_t last_gain, last_luma;
-        uint32_t g = w[2] >> 12, l = (uint32_t)luma;
+        uint32_t g = st->exp_gain, l = (uint32_t)luma;
         bool moved = !last_gain || g * 5 > last_gain * 6 || g * 6 < last_gain * 5 ||
                      (l > last_luma ? l - last_luma : last_luma - l) * 5 > last_luma + 5;
 
         if (moved) {
-            HAL_LOG_INFO("ae: luma %u gain %u | %u %u %u %u %u %u %u %u %u (%s)", l, g, w[0], w[1],
+            HAL_LOG_DBG("ae: luma %u gain %u | %u %u %u %u %u %u %u %u %u (%s)", l, g, w[0], w[1],
                          w[2], w[3], w[4], w[5], w[6], w[7], w[8],
                          st->isp_mode == RSS_ISP_NIGHT ? "night" : "day");
             last_gain = g;
@@ -416,8 +432,9 @@ static void fh_isp_sample_ae(fh_state_t *st)
 
     if (!st->exp_logged) {
         st->exp_logged = true;
-        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, gain %u", w[0],
-                     w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, w[2] >> 12);
+        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, "
+                     "exposure x gain %u",
+                     w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, st->exp_gain);
     }
 }
 
@@ -846,11 +863,27 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
     valid = st->exp_valid;
     exposure->ae_luma = st->exp_luma;
     exposure->total_gain = st->exp_gain;
+    exposure->exposure_time = st->exp_time;
     pthread_mutex_unlock(&st->exp_lock);
 
     if (!valid)
         return RSS_ERR_BUSY;
-    exposure->valid_mask = RSS_EXPOSURE_VALID_AE_LUMA | RSS_EXPOSURE_VALID_TOTAL_GAIN;
+
+    /*
+     * Luma only under the day tuning. Bench trace, 2026-11-05, lens covered:
+     * day tuning settles at luma 7, gain 4096, exposure word 24000 (its
+     * ceiling); the night tuning lets the AE run a far longer exposure
+     * (word 1 = 965534) and the same black scene then reads luma 53. Under
+     * the night tuning ae_luma says how hard the AE is working, not how
+     * bright the scene is, and ric -- which with no GPIO IR bank trusts luma
+     * for night->day -- took 53 >= 20 for daylight, switched, found luma 7
+     * and reverted: the double click. Withholding luma at night leaves ric
+     * its gain-ratio test (day below 25% of the settled night gain), which
+     * a covered lens never passes.
+     */
+    exposure->valid_mask = RSS_EXPOSURE_VALID_TOTAL_GAIN | RSS_EXPOSURE_VALID_TIME;
+    if (st->isp_mode != RSS_ISP_NIGHT)
+        exposure->valid_mask |= RSS_EXPOSURE_VALID_AE_LUMA;
     return RSS_OK;
 }
 
