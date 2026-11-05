@@ -292,6 +292,7 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspSetSaturation, "API_ISP_SetSaturation", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
+    FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSetColorMode, "FHAdv_Isp_SetColorMode", false);
 
     snprintf(path, sizeof(path), "/usr/lib/sensors/lib%s.so", st->snr_lib);
     p->h_snr = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -914,6 +915,41 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
 }
 
 /*
+ * fh_colour_set -- black-and-white at night, colour by day.
+ *
+ * Bench, 2026-11-05: forced night in a lit room came out pink. Zeroing the
+ * saturation record (divinus's greyscale) did not change it: the record's
+ * leading fields likely select the mode, and all-zero hands saturation back
+ * to the tuning's own table. The vendor's colour switch, FHAdv_Isp_SetColorMode
+ * (0 = B&W, 1 = colour -- per the FH8852V201 decompile), is tried first;
+ * both it and the saturation record are logged so the bench shows which
+ * one holds. Called with the 3A loop gated, after the tuning load.
+ */
+static void fh_colour_set(fh_state_t *st, bool colour)
+{
+    unsigned char *sat;
+    int rc = -1;
+
+    if (st->pipe.fnAdvIspSetColorMode) {
+        rc = st->pipe.fnAdvIspSetColorMode(colour ? 1 : 0);
+        HAL_LOG_INFO("isp: FHAdv_Isp_SetColorMode(%d) rc=%d", colour ? 1 : 0, rc);
+    }
+
+    if (!st->pipe.fnIspGetSaturation)
+        return;
+    sat = (unsigned char *)calloc(1, 1024);
+    if (!sat)
+        return;
+    if (!st->pipe.fnIspGetSaturation(sat))
+        HAL_LOG_INFO("isp: saturation record (%s): %02x %02x %02x %02x %02x %02x %02x %02x "
+                     "%02x %02x %02x %02x %02x %02x %02x %02x",
+                     colour ? "day" : "night", sat[0], sat[1], sat[2], sat[3], sat[4], sat[5],
+                     sat[6], sat[7], sat[8], sat[9], sat[10], sat[11], sat[12], sat[13], sat[14],
+                     sat[15]);
+    free(sat);
+}
+
+/*
  * hal_isp_set_running_mode -- swap the ISP tuning, divinus's way: gate the
  * 3A loop, load <lib>_night_attr.hex or <lib>_attr.hex, put mirror/flip
  * back (the load resets them), let the loop run again, and ask every video
@@ -976,25 +1012,6 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
             st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
         if (mode == RSS_ISP_NIGHT) {
             fh_day_ae_restore(st);
-            /*
-             * Greyscale at night, divinus's way: an all-zero saturation
-             * record. Bench, 2026-11-05: forced night in a lit room came out
-             * pink -- with the IR-cut filter out the night tuning still
-             * renders colour. The day file's load puts its own saturation
-             * back. 1 KiB of zeros because the record's size is unknown.
-             */
-            if (st->pipe.fnIspSetSaturation) {
-                unsigned char *z = (unsigned char *)calloc(1, 1024);
-
-                if (z) {
-                    int r = st->pipe.fnIspSetSaturation(z);
-
-                    if (r)
-                        HAL_LOG_WARN("isp: night greyscale (SetSaturation) failed 0x%x",
-                                     (unsigned)r);
-                    free(z);
-                }
-            }
         }
         if (have_ae) {
             int r2 = st->pipe.fnIspSetAeInfo(ae);
@@ -1003,6 +1020,7 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
                         ae[1], ae[2], ae[3], r2);
         }
         memset(st->luma_hist, 0, sizeof(st->luma_hist));
+        fh_colour_set(st, mode != RSS_ISP_NIGHT);
     }
 
     __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);

@@ -182,6 +182,7 @@ typedef struct {
     int (*fnIspSetSaturation)(void *sat);
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
+    int (*fnAdvIspSetColorMode)(int colour); /* 0 = black-and-white, 1 = colour */
 
     /* sensor library */
     void *snr_ops; /* <lib>_sensor_if, opaque, handed to API_ISP_SensorRegCb */
