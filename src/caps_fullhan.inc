@@ -22,6 +22,13 @@ const rss_hal_caps_t g_hal_caps = {
     .has_capped_rc = false,
     .has_smart_rc = false,
 
+    /* rvd builds the FS -> ENC graph only when this is set; without it rvd
+     * treats the encoder as owning the whole capture path and never binds
+     * (bench, 2026-11-05: channels created, never bound, no frames). */
+    .has_framesource = true,
+    .has_osd = false,
+    .has_ivs = false,
+
     .has_jpeg = true,
     .has_jpeg_qp = false,
     .jpeg_pulse = false,
