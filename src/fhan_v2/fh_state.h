@@ -89,6 +89,12 @@ typedef struct {
     int isp_busy;        /* atomic: inside API_ISP_Run */
     rss_isp_mode_t isp_mode;
     bool exp_logged, exp_warned;
+    /* Exposure, sampled by the 3A thread itself (see fh_isp_sample_ae);
+     * read by hal_isp_get_exposure under exp_lock. */
+    pthread_mutex_t exp_lock;
+    bool exp_lock_ready, exp_valid;
+    uint32_t exp_luma, exp_gain;
+    int64_t exp_next_us;
     bool isp_thread_started;
 #endif
 

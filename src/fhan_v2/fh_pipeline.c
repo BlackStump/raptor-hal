@@ -345,6 +345,57 @@ static int fh_tuning_load(fh_state_t *st, const char *path)
     return rc ? RSS_ERR_IO : RSS_OK;
 }
 
+static int64_t fh_mono_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+/*
+ * fh_isp_sample_ae -- read the AE status from the 3A thread, between two
+ * API_ISP_Run calls, and cache it.
+ *
+ * Bench, 2026-11-05: with ric polling, API_ISP_GetAeStatus called from rvd's
+ * control thread while this thread sat in API_ISP_Run died inside libc
+ * (pc in libc.so, fault at a page boundary in the vendor mappings) within
+ * seconds; the same call made once at bring-up, with nothing else running,
+ * never did. The ISP library is not safe to query concurrently with its own
+ * 3A loop, so the only thread that talks to it is this one.
+ */
+static void fh_isp_sample_ae(fh_state_t *st)
+{
+    unsigned int w[256];
+    unsigned long long area, luma;
+    int64_t now = fh_mono_us();
+
+    if (!st->pipe.fnIspGetAeStatus || now < st->exp_next_us)
+        return;
+    st->exp_next_us = now + 500000;
+
+    memset(w, 0, sizeof(w));
+    if (st->pipe.fnIspGetAeStatus(w))
+        return;
+
+    area = st->mode ? (unsigned long long)st->mode->width * st->mode->height : 0;
+    luma = area ? w[0] / area : 0;
+    if (luma > 255)
+        luma = 255;
+
+    pthread_mutex_lock(&st->exp_lock);
+    st->exp_luma = (uint32_t)luma;
+    st->exp_gain = w[2] >> 12;
+    st->exp_valid = true;
+    pthread_mutex_unlock(&st->exp_lock);
+
+    if (!st->exp_logged) {
+        st->exp_logged = true;
+        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, gain %u", w[0],
+                     w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, w[2] >> 12);
+    }
+}
+
 static void *fh_isp_thread(void *arg)
 {
     fh_state_t *st = (fh_state_t *)arg;
@@ -357,6 +408,7 @@ static void *fh_isp_thread(void *arg)
         }
         __atomic_store_n(&st->isp_busy, 1, __ATOMIC_RELEASE);
         st->pipe.fnIspRun();
+        fh_isp_sample_ae(st);
         __atomic_store_n(&st->isp_busy, 0, __ATOMIC_RELEASE);
         fh_sleep_ms(10);
     }
@@ -606,6 +658,12 @@ int fh_pipe_start(fh_state_t *st)
     if ((st->mirror || st->flip) && p->fnIspSetMirrorAndflipEx)
         p->fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
 
+    if (!st->exp_lock_ready) {
+        if (pthread_mutex_init(&st->exp_lock, NULL))
+            return RSS_ERR_IO;
+        st->exp_lock_ready = true;
+    }
+
     __atomic_store_n(&st->isp_thread_run, 1, __ATOMIC_RELEASE);
     __atomic_store_n(&st->isp_thread_done, 0, __ATOMIC_RELEASE);
     rc = pthread_create(&st->isp_thread, NULL, fh_isp_thread, st);
@@ -632,6 +690,11 @@ void fh_pipe_stop(fh_state_t *st)
      * about to close is the state that leaves the driver holding buffers. */
     fh_enc_teardown(st);
     fh_isp_thread_stop(st);
+    if (st->exp_lock_ready && !st->isp_thread_started) {
+        pthread_mutex_destroy(&st->exp_lock);
+        st->exp_lock_ready = false;
+        st->exp_valid = false;
+    }
     if (st->isp_inited) {
         p->fnIspExit();
         st->isp_inited = false;
@@ -731,6 +794,9 @@ int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den)
  *   GetAeStatus word 2 >> 12               -> total gain, 1024 at 2^22, the
  *       lit room's value; 4096 covered
  *
+ * The values come from the 3A thread's cache (fh_isp_sample_ae), twice a
+ * second; this op never calls into the ISP library itself.
+ *
  * Both are flagged valid, so ric runs its luma+gain hybrid. ric's night->day
  * test is a ratio against its own night baseline, so the gain's absolute
  * scale does not matter there; only night_gain (if set) would care. The
@@ -739,47 +805,25 @@ int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den)
 int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
 {
     fh_state_t *st = fh_state(ctx);
-    unsigned int *w;
-    unsigned long long area, luma;
-    int rc;
+    bool valid;
 
     if (!st || !exposure)
         return RSS_ERR_INVAL;
-    if (!st->isp_thread_started || !st->mode)
+    if (!st->isp_thread_started || !st->exp_lock_ready)
         return RSS_ERR_BUSY;
     if (!st->pipe.fnIspGetAeStatus)
         return RSS_ERR_NOTSUP;
 
-    w = (unsigned int *)calloc(256, sizeof(unsigned int));
-    if (!w)
-        return RSS_ERR_NOMEM;
-    rc = st->pipe.fnIspGetAeStatus(w);
-    if (rc) {
-        if (!st->exp_warned) {
-            st->exp_warned = true;
-            HAL_LOG_WARN("isp: API_ISP_GetAeStatus failed 0x%x; ric will hold its mode",
-                         (unsigned)rc);
-        }
-        free(w);
-        return RSS_ERR_IO;
-    }
-
-    area = (unsigned long long)st->mode->width * st->mode->height;
-    luma = area ? w[0] / area : 0;
-    if (luma > 255)
-        luma = 255;
-
-    if (!st->exp_logged) {
-        st->exp_logged = true;
-        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, gain %u", w[0],
-                     w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, w[2] >> 12);
-    }
-
     memset(exposure, 0, sizeof(*exposure));
-    exposure->ae_luma = (uint32_t)luma;
-    exposure->total_gain = w[2] >> 12;
+    pthread_mutex_lock(&st->exp_lock);
+    valid = st->exp_valid;
+    exposure->ae_luma = st->exp_luma;
+    exposure->total_gain = st->exp_gain;
+    pthread_mutex_unlock(&st->exp_lock);
+
+    if (!valid)
+        return RSS_ERR_BUSY;
     exposure->valid_mask = RSS_EXPOSURE_VALID_AE_LUMA | RSS_EXPOSURE_VALID_TOTAL_GAIN;
-    free(w);
     return RSS_OK;
 }
 
