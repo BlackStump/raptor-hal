@@ -292,7 +292,6 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspSetSaturation, "API_ISP_SetSaturation", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
-    FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSetColorMode, "FHAdv_Isp_SetColorMode", false);
 
     snprintf(path, sizeof(path), "/usr/lib/sensors/lib%s.so", st->snr_lib);
     p->h_snr = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
@@ -450,6 +449,7 @@ static void fh_isp_sample_ae(fh_state_t *st)
  * night file's other settings stay.
  */
 static unsigned int *fh_day_ae_cfg;
+static void fh_sat_save_day(fh_state_t *st);
 
 static void fh_day_ae_save(fh_state_t *st)
 {
@@ -750,6 +750,7 @@ int fh_pipe_start(fh_state_t *st)
         p->fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
 
     fh_day_ae_save(st);
+    fh_sat_save_day(st);
 
     if (!st->exp_lock_ready) {
         if (pthread_mutex_init(&st->exp_lock, NULL))
@@ -917,36 +918,66 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
 /*
  * fh_colour_set -- black-and-white at night, colour by day.
  *
- * Bench, 2026-11-05: forced night in a lit room came out pink. Zeroing the
- * saturation record (divinus's greyscale) did not change it: the record's
- * leading fields likely select the mode, and all-zero hands saturation back
- * to the tuning's own table. The vendor's colour switch, FHAdv_Isp_SetColorMode
- * (0 = B&W, 1 = colour -- per the FH8852V201 decompile), is tried first;
- * both it and the saturation record are logged so the bench shows which
- * one holds. Called with the 3A loop gated, after the tuning load.
+ * Bench, 2026-11-05: FHAdv_Isp_SetColorMode(0) returns 0 and changes
+ * nothing (FHAdv_Isp_Init fails on this board, so the advapi layer has no
+ * hold on the ISP), and an all-zero saturation record hands saturation to
+ * the tuning's table. The saturation record as read back:
+ *
+ *   day tuning    01 00 00 00  00 00 40 40  01 00 00 00  01 00 00 00
+ *   night tuning  00 00 00 00  ca 00 a3 03  01 00 00 00  00 00 00 00
+ *
+ * The day form reads as word 0 = 1 (manual), bytes 6 and 7 = 0x40 (unity
+ * colour gains). Black-and-white is that same manual record with both
+ * gains 0: the day record is captured once, at boot, and written back at
+ * night with bytes 6-7 cleared; the day load restores its own. Read back
+ * and logged each time.
  */
-static void fh_colour_set(fh_state_t *st, bool colour)
+static unsigned char fh_sat_day[1024];
+static bool fh_sat_day_saved;
+
+static void fh_sat_log(fh_state_t *st, const char *tag)
 {
-    unsigned char *sat;
-    int rc = -1;
+    unsigned char *sat = (unsigned char *)calloc(1, 1024);
 
-    if (st->pipe.fnAdvIspSetColorMode) {
-        rc = st->pipe.fnAdvIspSetColorMode(colour ? 1 : 0);
-        HAL_LOG_INFO("isp: FHAdv_Isp_SetColorMode(%d) rc=%d", colour ? 1 : 0, rc);
-    }
-
-    if (!st->pipe.fnIspGetSaturation)
-        return;
-    sat = (unsigned char *)calloc(1, 1024);
     if (!sat)
         return;
     if (!st->pipe.fnIspGetSaturation(sat))
         HAL_LOG_INFO("isp: saturation record (%s): %02x %02x %02x %02x %02x %02x %02x %02x "
                      "%02x %02x %02x %02x %02x %02x %02x %02x",
-                     colour ? "day" : "night", sat[0], sat[1], sat[2], sat[3], sat[4], sat[5],
-                     sat[6], sat[7], sat[8], sat[9], sat[10], sat[11], sat[12], sat[13], sat[14],
-                     sat[15]);
+                     tag, sat[0], sat[1], sat[2], sat[3], sat[4], sat[5], sat[6], sat[7], sat[8],
+                     sat[9], sat[10], sat[11], sat[12], sat[13], sat[14], sat[15]);
     free(sat);
+}
+
+static void fh_sat_save_day(fh_state_t *st)
+{
+    if (fh_sat_day_saved || !st->pipe.fnIspGetSaturation)
+        return;
+    memset(fh_sat_day, 0, sizeof(fh_sat_day));
+    if (!st->pipe.fnIspGetSaturation(fh_sat_day))
+        fh_sat_day_saved = true;
+}
+
+static void fh_colour_set(fh_state_t *st, bool colour)
+{
+    if (!st->pipe.fnIspGetSaturation || !st->pipe.fnIspSetSaturation)
+        return;
+
+    if (!colour && fh_sat_day_saved) {
+        unsigned char *grey = (unsigned char *)malloc(1024);
+        int rc;
+
+        if (!grey)
+            return;
+        memcpy(grey, fh_sat_day, 1024);
+        grey[6] = 0;
+        grey[7] = 0;
+        rc = st->pipe.fnIspSetSaturation(grey);
+        free(grey);
+        if (rc)
+            HAL_LOG_WARN("isp: night black-and-white: SetSaturation failed 0x%x", (unsigned)rc);
+    }
+    fh_sat_log(st, colour ? "day" : "night");
 }
 
 /*
