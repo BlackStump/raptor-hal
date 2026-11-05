@@ -284,9 +284,6 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeInfo2, "API_ISP_GetAeInfo2", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeStatus, "API_ISP_GetAeStatus", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeDefaultCfg, "API_ISP_GetAeDefaultCfg", false);
-    FH_SYM(p->h_isp, "libisp", p->fnIspGetAlgCtrl, "API_ISP_GetAlgCtrl", false);
-    FH_SYM(p->h_isp, "libisp", p->fnIspGetAeRouteCfg, "API_ISP_GetAeRouteCfg", false);
-    FH_SYM(p->h_isp, "libisp", p->fnIspSetAlgCtrl, "API_ISP_SetAlgCtrl", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspSetAeDefaultCfg, "API_ISP_SetAeDefaultCfg", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
@@ -362,21 +359,36 @@ static int64_t fh_mono_us(void)
 }
 
 /*
- * fh_isp_sample_ae -- read the AE status from the 3A thread, between two
- * API_ISP_Run calls, and cache it.
+ * fh_isp_sample_ae -- read the AE from the 3A thread, between two
+ * API_ISP_Run calls, and cache what ric is given.
  *
- * Bench, 2026-11-05: with ric polling, API_ISP_GetAeStatus called from rvd's
- * control thread while this thread sat in API_ISP_Run died inside libc
- * (pc in libc.so, fault at a page boundary in the vendor mappings) within
- * seconds; the same call made once at bring-up, with nothing else running,
- * never did. The ISP library is not safe to query concurrently with its own
- * 3A loop, so the only thread that talks to it is this one.
+ * Only this thread talks to the ISP library: called from rvd's control
+ * thread while API_ISP_Run was running, API_ISP_GetAeStatus died inside
+ * libc's memcpy within seconds (bench, 2026-11-05).
+ *
+ * What is cached, from the bench traces (lit room vs lens covered):
+ *
+ *   luma   GetAeStatus word 0 / picture area: an 8-bit mean, 145 lit, 7
+ *          covered. Single reads come back 0 now and then with every AE
+ *          value unchanged, so the reported luma is the largest of the last
+ *          three samples (1.5 s) -- a real fall to dark still shows within
+ *          that window, a lone zero never does.
+ *
+ *   gain   GetAeInfo: exposure x sensor gain x ISP gain, in exposure lines
+ *          at 1x (word 0 x word 1/256 x word 3/64). 79-669 lit, 77648
+ *          covered: a 1000:1 range, so ric's night->day test (below 25% of
+ *          the settled night value) has room to fire. GetAeStatus's own
+ *          exposure and gain words do not: its exposure word sits at 24000
+ *          both lit and covered under the restored AE configuration, and its
+ *          gain bottoms out at 1x.
  */
 static void fh_isp_sample_ae(fh_state_t *st)
 {
-    unsigned int w[256];
-    unsigned long long area, luma;
+    unsigned int w[256], ai[64];
+    unsigned long long area, luma, prod = 0;
     int64_t now = fh_mono_us();
+    uint32_t l;
+    int i;
 
     if (!st->pipe.fnIspGetAeStatus || now < st->exp_next_us)
         return;
@@ -385,209 +397,86 @@ static void fh_isp_sample_ae(fh_state_t *st)
     memset(w, 0, sizeof(w));
     if (st->pipe.fnIspGetAeStatus(w))
         return;
+    memset(ai, 0, sizeof(ai));
+    if (st->pipe.fnIspGetAeInfo && !st->pipe.fnIspGetAeInfo(ai))
+        prod = ((unsigned long long)ai[0] * ai[1] * ai[3]) / (256u * 64u);
 
     area = st->mode ? (unsigned long long)st->mode->width * st->mode->height : 0;
     luma = area ? w[0] / area : 0;
     if (luma > 255)
         luma = 255;
 
-    /*
-     * "Gain" for ric is the exposure-gain product, not the analog gain
-     * alone. The gain word bottoms out at 1x (1024) in any lit scene and
-     * the day tuning tops out at 4x, so gain alone spans 4:1 -- and ric's
-     * night->day rule (below 25% of the night baseline) then needs the
-     * gain to fall *below* 1x, which it cannot. Word 1 (exposure, 24000 at
-     * the day tuning's ceiling, 6560-23088 lit, 965534 under the night
-     * tuning's long exposure) times the gain spans more than 500:1 across
-     * the bench readings: 6560 lit, 96000 covered by day, ~3.9M covered by
-     * night. That is the quantity the AE actually trades against light.
-     */
-    {
-        unsigned long long prod = ((unsigned long long)w[1] * (w[2] >> 12)) >> 10;
+    st->luma_hist[st->luma_pos] = (uint32_t)luma;
+    st->luma_pos = (st->luma_pos + 1) % 3;
+    for (l = 0, i = 0; i < 3; i++)
+        if (st->luma_hist[i] > l)
+            l = st->luma_hist[i];
 
-        pthread_mutex_lock(&st->exp_lock);
-        st->exp_luma = (uint32_t)luma;
-        st->exp_gain = prod > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)prod;
-        st->exp_time = w[1];
-        st->exp_valid = true;
-        pthread_mutex_unlock(&st->exp_lock);
-    }
+    pthread_mutex_lock(&st->exp_lock);
+    st->exp_luma = l;
+    st->exp_gain = prod > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)prod;
+    st->exp_time = ai[0];
+    st->exp_valid = prod != 0;
+    pthread_mutex_unlock(&st->exp_lock);
 
-    /*
-     * Trace (bench, 2026-11-05): ric switched to day with the lens still
-     * covered, which needs the reported gain to fall below a quarter of its
-     * settled night value. Log every reading whose gain or luma moved by
-     * more than a fifth since the last one logged, with the raw words, to
-     * see what the AE actually does under each tuning.
-     */
-    {
-        static uint32_t last_gain, last_luma;
-        uint32_t g = st->exp_gain, l = (uint32_t)luma;
-        bool moved = !last_gain || g * 5 > last_gain * 6 || g * 6 < last_gain * 5 ||
-                     (l > last_luma ? l - last_luma : last_luma - l) * 5 > last_luma + 5;
-
-        if (moved) {
-            HAL_LOG_DBG("ae: luma %u gain %u | %u %u %u %u %u %u %u %u %u (%s)", l, g, w[0], w[1],
-                         w[2], w[3], w[4], w[5], w[6], w[7], w[8],
-                         st->isp_mode == RSS_ISP_NIGHT ? "night" : "day");
-            last_gain = g;
-            last_luma = l;
-        }
-    }
-
-    /*
-     * Diagnostic, every 2 s: under the night tuning the AE status's exposure
-     * and gain words read 965534 / 4x both covered and in a lit room (luma
-     * 53 vs 127), as if frozen at the values the tuning file loaded.
-     * GetAeInfo is a separate, smaller AE readback (exposure, sensor gain,
-     * ISP gains); logging both side by side, under each tuning and light
-     * level, shows which one follows the scene.
-     */
-    {
-        static int64_t next_trace;
-
-        if (now >= next_trace && st->pipe.fnIspGetAeInfo) {
-            unsigned int ai[64];
-
-            next_trace = now + 2000000;
-            memset(ai, 0, sizeof(ai));
-            st->pipe.fnIspGetAeInfo(ai);
-            HAL_LOG_INFO("aetrace %s: luma %llu | info %u %u %u %u | status w1 %u w2 %u w3 %u w4 %u "
-                         "w6 %u w8 %u",
-                         st->isp_mode == RSS_ISP_NIGHT ? "night" : "day", luma, ai[0], ai[1], ai[2],
-                         ai[3], w[1], w[2], w[3], w[4], w[6], w[8]);
-        }
-    }
+    HAL_LOG_DBG("ae: luma %llu (reported %u) exposure x gain %llu | info %u %u %u %u (%s)", luma,
+                l, prod, ai[0], ai[1], ai[2], ai[3],
+                st->isp_mode == RSS_ISP_NIGHT ? "night" : "day");
 
     if (!st->exp_logged) {
         st->exp_logged = true;
-        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, "
-                     "exposure x gain %u",
-                     w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, st->exp_gain);
+        HAL_LOG_INFO("isp: first AE reading: luma %llu, exposure x gain %llu (info %u %u %u %u)",
+                     luma, prod, ai[0], ai[1], ai[2], ai[3]);
     }
-}
-
-
-/*
- * fh_cfg_dump -- diagnostic: what a tuning load changes in the AE setup.
- *
- * Bench, 2026-11-05: after the night tuning loads, the AE stops -- exposure
- * and gain frozen at the file's values whether the room is lit or the lens
- * covered. Three readbacks that could hold the switch: the AE default
- * config, the algorithm-control word(s), and the AE route. Each is read
- * into a 16 KiB zeroed heap buffer (their sizes are unknown, and a struct
- * larger than the buffer would overrun it) after every tuning load, with
- * the 3A loop gated, and the words that differ from the previous load are
- * logged.
- */
-static void fh_cfg_dump_one(const char *name, int (*fn)(void *), unsigned int *prev, bool *have,
-                            const char *tag)
-{
-    unsigned int *cur;
-    char line[400];
-    size_t len = 0;
-    int rc, i, last = -1, shown = 0;
-
-    if (!fn)
-        return;
-    cur = (unsigned int *)calloc(4096, sizeof(unsigned int));
-    if (!cur)
-        return;
-    rc = fn(cur);
-    for (i = 0; i < 1024; i++)
-        if (cur[i])
-            last = i;
-    for (i = 1024; i < 4096; i++)
-        if (cur[i]) {
-            HAL_LOG_WARN("cfgdump %s: wrote past 4 KiB (word %d); comparing the first 1024", name,
-                         i);
-            break;
-        }
-
-    line[0] = 0;
-    for (i = 0; i <= last && shown < 24; i++) {
-        if (*have ? cur[i] == prev[i] : !cur[i])
-            continue;
-        if (*have)
-            len += (size_t)snprintf(line + len, sizeof(line) - len, " [%d]%u->%u", i, prev[i],
-                                    cur[i]);
-        else
-            len += (size_t)snprintf(line + len, sizeof(line) - len, " [%d]%u", i, cur[i]);
-        shown++;
-        if (len >= sizeof(line) - 24)
-            break;
-    }
-    HAL_LOG_INFO("cfgdump %s %s: rc=%d, %d words%s%s", tag, name, rc, last + 1,
-                 *have ? (shown ? ", changed:" : ", unchanged") : ", nonzero:", line);
-    memcpy(prev, cur, 1024 * sizeof(unsigned int));
-    *have = true;
-    free(cur);
-}
-
-/* The AE default config as the day tuning left it, for the night experiment. */
-static unsigned int fh_day_ae_cfg[1024];
-static bool fh_day_ae_cfg_saved;
-
-static void fh_cfg_dump(fh_state_t *st, const char *tag)
-{
-    static unsigned int p_ae[1024], p_alg[1024], p_route[1024];
-    static bool h_ae, h_alg, h_route;
-
-    if (!fh_day_ae_cfg_saved && st->pipe.fnIspGetAeDefaultCfg && !strcmp(tag, "boot-day")) {
-        unsigned int *b = (unsigned int *)calloc(4096, sizeof(unsigned int));
-
-        if (b && !st->pipe.fnIspGetAeDefaultCfg(b)) {
-            memcpy(fh_day_ae_cfg, b, sizeof(fh_day_ae_cfg));
-            fh_day_ae_cfg_saved = true;
-        }
-        free(b);
-    }
-
-    fh_cfg_dump_one("AeDefaultCfg", st->pipe.fnIspGetAeDefaultCfg, p_ae, &h_ae, tag);
-    fh_cfg_dump_one("AlgCtrl", st->pipe.fnIspGetAlgCtrl, p_alg, &h_alg, tag);
-    fh_cfg_dump_one("AeRouteCfg", st->pipe.fnIspGetAeRouteCfg, p_route, &h_route, tag);
 }
 
 /*
- * fh_night_ae_experiment -- bench switches, read from rvd's environment,
- * applied right after the night tuning loads. The dumps showed the night
- * file clearing AlgCtrl bits 0x1, 0x8, 0x10, 0x20000000, 0x80000000
- * (0xb37dc91b -> 0x137dc902) and rewriting the AE default config, and the
- * AE then stops. These put pieces back, one at a time:
+ * The night tuning and auto-exposure.
  *
- *   FH_NIGHT_ALGCTRL_OR=0x1      OR these bits back into AlgCtrl
- *   FH_NIGHT_AECFG_DAY=1         restore the day tuning's AE default config
+ * Bench, 2026-11-05: loading gc4653_mipi_night_attr.hex stops the AE dead --
+ * exposure and gain hold the file's values whether the room is lit or the
+ * lens covered. The night file rewrites the AE default configuration (and
+ * clears bits in AlgCtrl, which is not a plain bitmask: OR-ing them back
+ * read back as 0xbeef2210, so it is left alone). Putting back the AE default
+ * configuration the day tuning set, right after the night load, brings the
+ * AE back -- it then tracks the scene under the night tuning exactly as by
+ * day (lit: exposure 79-669 at 1x; covered: 4853 at 4x x 4x) -- while the
+ * night file's other settings stay.
  */
-static void fh_night_ae_experiment(fh_state_t *st)
+static unsigned int *fh_day_ae_cfg;
+
+static void fh_day_ae_save(fh_state_t *st)
 {
-    const char *v = getenv("FH_NIGHT_ALGCTRL_OR");
-    unsigned int buf[64];
+    if (fh_day_ae_cfg || !st->pipe.fnIspGetAeDefaultCfg)
+        return;
+    /* 16 KiB: the struct's size is unknown (it writes ~104 words); a buffer
+     * smaller than it would be overrun. */
+    fh_day_ae_cfg = (unsigned int *)calloc(4096, sizeof(unsigned int));
+    if (fh_day_ae_cfg && st->pipe.fnIspGetAeDefaultCfg(fh_day_ae_cfg)) {
+        free(fh_day_ae_cfg);
+        fh_day_ae_cfg = NULL;
+    }
+    if (!fh_day_ae_cfg)
+        HAL_LOG_WARN("isp: could not save the day AE configuration; the night tuning will run "
+                     "with a fixed exposure");
+}
+
+static void fh_day_ae_restore(fh_state_t *st)
+{
+    unsigned int *b;
     int rc;
 
-    if (v && st->pipe.fnIspGetAlgCtrl && st->pipe.fnIspSetAlgCtrl) {
-        unsigned long mask = strtoul(v, NULL, 0);
-
-        memset(buf, 0, sizeof(buf));
-        st->pipe.fnIspGetAlgCtrl(buf);
-        HAL_LOG_INFO("experiment: AlgCtrl 0x%08x |= 0x%08lx", buf[0], mask);
-        buf[0] |= (unsigned int)mask;
-        rc = st->pipe.fnIspSetAlgCtrl(buf);
-        memset(buf, 0, sizeof(buf));
-        st->pipe.fnIspGetAlgCtrl(buf);
-        HAL_LOG_INFO("experiment: SetAlgCtrl rc=%d, now 0x%08x", rc, buf[0]);
-    }
-
-    v = getenv("FH_NIGHT_AECFG_DAY");
-    if (v && *v == '1' && fh_day_ae_cfg_saved && st->pipe.fnIspSetAeDefaultCfg) {
-        unsigned int *b = (unsigned int *)calloc(4096, sizeof(unsigned int));
-
-        if (b) {
-            memcpy(b, fh_day_ae_cfg, sizeof(fh_day_ae_cfg));
-            rc = st->pipe.fnIspSetAeDefaultCfg(b);
-            HAL_LOG_INFO("experiment: SetAeDefaultCfg(day copy) rc=%d", rc);
-            free(b);
-        }
-    }
+    if (!fh_day_ae_cfg || !st->pipe.fnIspSetAeDefaultCfg)
+        return;
+    b = (unsigned int *)malloc(4096 * sizeof(unsigned int));
+    if (!b)
+        return;
+    memcpy(b, fh_day_ae_cfg, 4096 * sizeof(unsigned int));
+    rc = st->pipe.fnIspSetAeDefaultCfg(b);
+    free(b);
+    if (rc)
+        HAL_LOG_WARN("isp: restoring the AE configuration after the night tuning failed 0x%x",
+                     (unsigned)rc);
 }
 
 static void *fh_isp_thread(void *arg)
@@ -854,7 +743,7 @@ int fh_pipe_start(fh_state_t *st)
     if ((st->mirror || st->flip) && p->fnIspSetMirrorAndflipEx)
         p->fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
 
-    fh_cfg_dump(st, "boot-day");
+    fh_day_ae_save(st);
 
     if (!st->exp_lock_ready) {
         if (pthread_mutex_init(&st->exp_lock, NULL))
@@ -976,29 +865,10 @@ int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den)
 /*
  * hal_isp_get_exposure -- what ric decides day and night from.
  *
- * Measured on M2 (2026-11-05), lit room vs lens covered, ~1 s after start:
- *
- *   GetAeInfo    4 words   875 256 64 64        -> 4853 1024 64 256
- *   GetAeInfo2   5 words   875 256 256 64 64    -> 4853 256 1024 64 256
- *   GetAeStatus 54 words   535124312 19555 4194304 64 64 ...
- *                       -> 28846662 24000 16777216 4853 19412 ...
- *
- * divinus's note for GetAeInfo (word 3 exposure, word 4 total gain) does not
- * hold on this build: it writes four words, so word 4 is always 0. What the
- * numbers do support, provisionally:
- *
- *   GetAeStatus word 0 / (width * height)  -> mean luma, 145 lit, 7.8 dark:
- *       an 8-bit mean over the full picture is exactly the scale that gives
- *   GetAeStatus word 2 >> 12               -> total gain, 1024 at 2^22, the
- *       lit room's value; 4096 covered
- *
- * The values come from the 3A thread's cache (fh_isp_sample_ae), twice a
- * second; this op never calls into the ISP library itself.
- *
- * Both are flagged valid, so ric runs its luma+gain hybrid. ric's night->day
- * test is a ratio against its own night baseline, so the gain's absolute
- * scale does not matter there; only night_gain (if set) would care. The
- * raw words are logged on the first call.
+ * Served from the 3A thread's cache (fh_isp_sample_ae, which documents the
+ * sources), twice a second; this op never calls into the ISP library.
+ * total_gain is the exposure x gain product from GetAeInfo; ae_luma the
+ * picture's mean, reported by day only (see below).
  */
 int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
 {
@@ -1024,16 +894,13 @@ int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
         return RSS_ERR_BUSY;
 
     /*
-     * Luma only under the day tuning. Bench trace, 2026-11-05, lens covered:
-     * day tuning settles at luma 7, gain 4096, exposure word 24000 (its
-     * ceiling); the night tuning lets the AE run a far longer exposure
-     * (word 1 = 965534) and the same black scene then reads luma 53. Under
-     * the night tuning ae_luma says how hard the AE is working, not how
-     * bright the scene is, and ric -- which with no GPIO IR bank trusts luma
-     * for night->day -- took 53 >= 20 for daylight, switched, found luma 7
-     * and reverted: the double click. Withholding luma at night leaves ric
-     * its gain-ratio test (day below 25% of the settled night gain), which
-     * a covered lens never passes.
+     * Luma only under the day tuning. At night the picture's brightness is
+     * not the scene's: the IR lamps light it (and before the AE fix, the
+     * night tuning's frozen exposure read a covered lens as luma 53, which
+     * ric took for daylight -- the double click). ric has no GPIO IR bank
+     * on this board, so it would trust luma for night->day; withholding it
+     * at night leaves ric its gain-ratio test (day below 25% of the settled
+     * night exposure x gain), which a dark scene never passes.
      */
     exposure->valid_mask = RSS_EXPOSURE_VALID_TOTAL_GAIN | RSS_EXPOSURE_VALID_TIME;
     if (st->isp_mode != RSS_ISP_NIGHT)
@@ -1085,8 +952,7 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
     if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
         st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
     if (mode == RSS_ISP_NIGHT)
-        fh_night_ae_experiment(st);
-    fh_cfg_dump(st, mode == RSS_ISP_NIGHT ? "night" : "day");
+        fh_day_ae_restore(st);
 
     __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);
     fh_sleep_ms(200);

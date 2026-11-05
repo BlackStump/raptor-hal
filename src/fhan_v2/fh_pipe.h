@@ -173,11 +173,8 @@ typedef struct {
     int (*fnIspGetAeInfo)(void *info);   /* optional */
     int (*fnIspGetAeInfo2)(void *info);  /* optional, probed only */
     int (*fnIspGetAeStatus)(void *info); /* optional, probed only */
-    int (*fnIspGetAeDefaultCfg)(void *cfg); /* diagnostic */
-    int (*fnIspGetAlgCtrl)(void *cfg);      /* diagnostic */
-    int (*fnIspGetAeRouteCfg)(void *cfg);   /* diagnostic */
-    int (*fnIspSetAlgCtrl)(void *cfg);      /* night AE experiment */
-    int (*fnIspSetAeDefaultCfg)(void *cfg); /* night AE experiment */
+    int (*fnIspGetAeDefaultCfg)(void *cfg); /* saved after the day tuning */
+    int (*fnIspSetAeDefaultCfg)(void *cfg); /* restored after the night one */
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
 

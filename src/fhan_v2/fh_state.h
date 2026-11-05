@@ -94,6 +94,8 @@ typedef struct {
     pthread_mutex_t exp_lock;
     bool exp_lock_ready, exp_valid;
     uint32_t exp_luma, exp_gain, exp_time;
+    uint32_t luma_hist[3];
+    int luma_pos;
     int64_t exp_next_us;
     bool isp_thread_started;
 #endif
