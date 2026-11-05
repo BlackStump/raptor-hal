@@ -726,12 +726,37 @@ static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
      */
     rc->mode = h265 ? FH_RC_H265CBR : FH_RC_H264CBR;
     HAL_LOG_INFO("venc chn %d: %s CBR %u kbps", chn, h265 ? "H.265" : "H.264", kbps);
-    rc->param[0] = 35;
+    /*
+     * QP bounds. divinus's values were init 35, max 50 (words 3 and 5),
+     * min 35 (word 4). Bench, 2026-11-05: CBR held ~190 kbit/s against a
+     * 4000 target on a static lit scene with the bitrate word in either
+     * kbps<<10 or plain bps (identical results; plain kbps is rejected as
+     * out of range) -- the encoder sitting on its QP floor of 35, unable
+     * to spend the budget, and the picture blocky. FH_RC_QP=init,min,max
+     * in rvd's environment overrides all three for the bench.
+     */
+    {
+        unsigned int qinit = 35, qmin = 35, qmax = 50;
+        const char *q = getenv("FH_RC_QP");
+
+        if (q) {
+            unsigned int a, b, c;
+
+            if (sscanf(q, "%u,%u,%u", &a, &b, &c) == 3 && b <= a && a <= c && c <= 51) {
+                qinit = a;
+                qmin = b;
+                qmax = c;
+            } else {
+                HAL_LOG_WARN("FH_RC_QP='%s' is not init,min,max with min<=init<=max<=51", q);
+            }
+        }
+        rc->param[0] = qinit;
+        rc->param[3] = qmax;
+        rc->param[4] = qmin;
+        rc->param[5] = qmax;
+    }
     rc->param[1] = fh_rate_word(enc->bitrate);
     rc->param[2] = frw;
-    rc->param[3] = 50;
-    rc->param[4] = 35;
-    rc->param[5] = 50;
     rc->param[6] = frw;
     rc->param[7] = 120;
     rc->param[10] = 5;
