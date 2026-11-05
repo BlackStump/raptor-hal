@@ -286,6 +286,8 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeDefaultCfg, "API_ISP_GetAeDefaultCfg", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAlgCtrl, "API_ISP_GetAlgCtrl", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeRouteCfg, "API_ISP_GetAeRouteCfg", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspSetAlgCtrl, "API_ISP_SetAlgCtrl", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspSetAeDefaultCfg, "API_ISP_SetAeDefaultCfg", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
 
@@ -522,14 +524,70 @@ static void fh_cfg_dump_one(const char *name, int (*fn)(void *), unsigned int *p
     free(cur);
 }
 
+/* The AE default config as the day tuning left it, for the night experiment. */
+static unsigned int fh_day_ae_cfg[1024];
+static bool fh_day_ae_cfg_saved;
+
 static void fh_cfg_dump(fh_state_t *st, const char *tag)
 {
     static unsigned int p_ae[1024], p_alg[1024], p_route[1024];
     static bool h_ae, h_alg, h_route;
 
+    if (!fh_day_ae_cfg_saved && st->pipe.fnIspGetAeDefaultCfg && !strcmp(tag, "boot-day")) {
+        unsigned int *b = (unsigned int *)calloc(4096, sizeof(unsigned int));
+
+        if (b && !st->pipe.fnIspGetAeDefaultCfg(b)) {
+            memcpy(fh_day_ae_cfg, b, sizeof(fh_day_ae_cfg));
+            fh_day_ae_cfg_saved = true;
+        }
+        free(b);
+    }
+
     fh_cfg_dump_one("AeDefaultCfg", st->pipe.fnIspGetAeDefaultCfg, p_ae, &h_ae, tag);
     fh_cfg_dump_one("AlgCtrl", st->pipe.fnIspGetAlgCtrl, p_alg, &h_alg, tag);
     fh_cfg_dump_one("AeRouteCfg", st->pipe.fnIspGetAeRouteCfg, p_route, &h_route, tag);
+}
+
+/*
+ * fh_night_ae_experiment -- bench switches, read from rvd's environment,
+ * applied right after the night tuning loads. The dumps showed the night
+ * file clearing AlgCtrl bits 0x1, 0x8, 0x10, 0x20000000, 0x80000000
+ * (0xb37dc91b -> 0x137dc902) and rewriting the AE default config, and the
+ * AE then stops. These put pieces back, one at a time:
+ *
+ *   FH_NIGHT_ALGCTRL_OR=0x1      OR these bits back into AlgCtrl
+ *   FH_NIGHT_AECFG_DAY=1         restore the day tuning's AE default config
+ */
+static void fh_night_ae_experiment(fh_state_t *st)
+{
+    const char *v = getenv("FH_NIGHT_ALGCTRL_OR");
+    unsigned int buf[64];
+    int rc;
+
+    if (v && st->pipe.fnIspGetAlgCtrl && st->pipe.fnIspSetAlgCtrl) {
+        unsigned long mask = strtoul(v, NULL, 0);
+
+        memset(buf, 0, sizeof(buf));
+        st->pipe.fnIspGetAlgCtrl(buf);
+        HAL_LOG_INFO("experiment: AlgCtrl 0x%08x |= 0x%08lx", buf[0], mask);
+        buf[0] |= (unsigned int)mask;
+        rc = st->pipe.fnIspSetAlgCtrl(buf);
+        memset(buf, 0, sizeof(buf));
+        st->pipe.fnIspGetAlgCtrl(buf);
+        HAL_LOG_INFO("experiment: SetAlgCtrl rc=%d, now 0x%08x", rc, buf[0]);
+    }
+
+    v = getenv("FH_NIGHT_AECFG_DAY");
+    if (v && *v == '1' && fh_day_ae_cfg_saved && st->pipe.fnIspSetAeDefaultCfg) {
+        unsigned int *b = (unsigned int *)calloc(4096, sizeof(unsigned int));
+
+        if (b) {
+            memcpy(b, fh_day_ae_cfg, sizeof(fh_day_ae_cfg));
+            rc = st->pipe.fnIspSetAeDefaultCfg(b);
+            HAL_LOG_INFO("experiment: SetAeDefaultCfg(day copy) rc=%d", rc);
+            free(b);
+        }
+    }
 }
 
 static void *fh_isp_thread(void *arg)
@@ -1026,6 +1084,8 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
     rc = fh_tuning_load(st, path);
     if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
         st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
+    if (mode == RSS_ISP_NIGHT)
+        fh_night_ae_experiment(st);
     fh_cfg_dump(st, mode == RSS_ISP_NIGHT ? "night" : "day");
 
     __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);

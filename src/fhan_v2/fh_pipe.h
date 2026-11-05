@@ -176,6 +176,8 @@ typedef struct {
     int (*fnIspGetAeDefaultCfg)(void *cfg); /* diagnostic */
     int (*fnIspGetAlgCtrl)(void *cfg);      /* diagnostic */
     int (*fnIspGetAeRouteCfg)(void *cfg);   /* diagnostic */
+    int (*fnIspSetAlgCtrl)(void *cfg);      /* night AE experiment */
+    int (*fnIspSetAeDefaultCfg)(void *cfg); /* night AE experiment */
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
 
