@@ -659,23 +659,14 @@ static unsigned int fh_h264_qp_for(uint32_t bitrate_bps)
 }
 
 /*
- * The bitrate word's unit. divinus writes kbps << 10. Bench, 2026-11-05:
- * with that, CBR held 126-530 kbit/s against a 4000 target on a static lit
- * scene (and 11-45 against 1000 on the sub-stream) -- the picture visibly
- * blocky -- so the unit is in doubt. FH_RC_UNITS in rvd's environment
- * picks another for the bench: "bps" (bits/s), "kbps" (kbit/s); unset is
- * kbps << 10.
+ * The bitrate word is bits per second. Bench, 2026-11-05, with the RC
+ * layout fixed: 4096000 (divinus's kbps << 10) produced 4094 kbit/s and
+ * 1024000 produced 1026 -- the driver delivers the word in bit/s, so
+ * kbps << 10 overshoots by 2.4%.
  */
 static unsigned int fh_rate_word(uint32_t bitrate_bps)
 {
-    const char *u = getenv("FH_RC_UNITS");
-    unsigned int kbps = bitrate_bps ? bitrate_bps / 1000u : 1024u;
-
-    if (u && !strcmp(u, "bps"))
-        return bitrate_bps ? bitrate_bps : 1024000u;
-    if (u && !strcmp(u, "kbps"))
-        return kbps;
-    return kbps << 10;
+    return bitrate_bps ? bitrate_bps : 1024000u;
 }
 
 /*
@@ -704,8 +695,9 @@ static unsigned int fh_rate_word(uint32_t bitrate_bps)
  * converged: bench CBR held ~190 kbit/s whatever the target or QP bounds.
  *
  * So the tail words take mode 9's constants: k14 = 5, k15 = 1, k16 = 50,
- * k17 = 10 (mode 8's fixed values), k20 = 0, k21 = -2. The bitrate is in
- * bits/s (kbps is refused as out of range); FH_RC_UNITS still overrides.
+ * k17 = 10 (mode 8's fixed values), k20 = 0, k21 = -2. Bench, with this:
+ * H.264 CBR, H.264 VBR and H.265 CBR all held 4094-4144 kbit/s against
+ * 4096 asked and ~1026 against 1024, still or moving.
  */
 static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
 {
