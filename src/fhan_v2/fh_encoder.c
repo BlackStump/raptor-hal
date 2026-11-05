@@ -242,7 +242,8 @@ static void *fh_collect_thread(void *arg)
     const unsigned int mask = FH_CODEC_H264 | FH_CODEC_H265 | FH_CODEC_MJPEG;
     fh_venc_strm strm;
     fh_piece pc[40];
-    int64_t last_drop_log = 0;
+    int64_t last_drop_log = 0, last_bad_log = 0;
+    unsigned int bad_frames = 0;
 
     HAL_LOG_INFO("venc: collector thread tid %ld", syscall(SYS_gettid));
 
@@ -272,13 +273,49 @@ static void *fh_collect_thread(void *arg)
             npc = pc[0].data ? 1 : 0;
         } else {
             unsigned int n = strm.nalu_cnt > 40 ? 40 : strm.nalu_cnt;
+            unsigned long long total = 0;
 
             for (i = 0; i < n; i++) {
                 if (!strm.nalu[i].addr || !strm.nalu[i].length)
                     continue;
                 pc[npc].data = (const uint8_t *)(uintptr_t)strm.nalu[i].addr;
                 pc[npc].len = strm.nalu[i].length;
+                total += strm.nalu[i].length;
                 npc++;
+            }
+
+            /*
+             * Bench, 2026-11-05: the collector died in memcpy reading past
+             * the end of a vendor mapping with ~570 KB still to copy -- a
+             * NAL whose length does not fit its buffer. field10 is the
+             * frame's byte count (123483 against NALs summing to 123460 on
+             * the first IDR), so a frame whose NALs add up to more than that
+             * is not copied: it is logged whole, released and skipped. So is
+             * anything over 1.5 MB, which no frame of these settings comes
+             * near and which is most of the 2.5 MB stream buffer.
+             */
+            if (npc && (total > 1572864u ||
+                        (strm.field10 && total > (unsigned long long)strm.field10 + 4096u))) {
+                int64_t now = fh_now_us();
+
+                if (now - last_bad_log > 2000000) {
+                    last_bad_log = now;
+                    HAL_LOG_WARN("venc chn %u: frame claims %llu bytes in %u NALs against a "
+                                 "%u-byte frame; dropped. header %08x %08x %08x %08x %08x %08x "
+                                 "%08x",
+                                 strm.field04, total, n, strm.field10, strm.type, strm.field04,
+                                 strm.field08, strm.field0c, strm.field10, strm.field14,
+                                 strm.field18);
+                    for (i = 0; i < n && i < 6; i++)
+                        HAL_LOG_WARN("venc chn %u:   nalu %u: type %u len %u addr %08x",
+                                     strm.field04, i, strm.nalu[i].type, strm.nalu[i].length,
+                                     strm.nalu[i].addr);
+                }
+                bad_frames++;
+                npc = 0;
+                if (chn < FH_VENC_CHN_MAX &&
+                    (st->enc[chn].codec == RSS_CODEC_H264 || st->enc[chn].codec == RSS_CODEC_H265))
+                    st->pipe.fnVencRequestIdr(chn);
             }
         }
 
@@ -318,6 +355,8 @@ static void *fh_collect_thread(void *arg)
         }
     }
 
+    if (bad_frames)
+        HAL_LOG_WARN("venc: %u frame(s) dropped as inconsistent", bad_frames);
     __atomic_store_n(&st->collect_done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
