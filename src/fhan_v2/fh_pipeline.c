@@ -278,6 +278,8 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(p->h_isp, "libisp", p->fnIspSetMirrorAndflipEx, "API_ISP_SetMirrorAndflipEx", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetVIState, "API_ISP_GetVIState", false);
     FH_SYM(p->h_isp, "libisp", p->fnIspGetAeInfo, "API_ISP_GetAeInfo", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetAeInfo2, "API_ISP_GetAeInfo2", false);
+    FH_SYM(p->h_isp, "libisp", p->fnIspGetAeStatus, "API_ISP_GetAeStatus", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspInit, "FHAdv_Isp_Init", false);
     FH_SYM(p->h_advisp, "libadvapi_isp", p->fnAdvIspSensorInit, "FHAdv_Isp_SensorInit", false);
 
@@ -348,7 +350,14 @@ static void *fh_isp_thread(void *arg)
     fh_state_t *st = (fh_state_t *)arg;
 
     while (__atomic_load_n(&st->isp_thread_run, __ATOMIC_ACQUIRE)) {
+        /* divinus's gate: a tuning load must not race the 3A loop. */
+        if (__atomic_load_n(&st->isp_pause, __ATOMIC_ACQUIRE)) {
+            fh_sleep_ms(20);
+            continue;
+        }
+        __atomic_store_n(&st->isp_busy, 1, __ATOMIC_RELEASE);
         st->pipe.fnIspRun();
+        __atomic_store_n(&st->isp_busy, 0, __ATOMIC_RELEASE);
         fh_sleep_ms(10);
     }
     __atomic_store_n(&st->isp_thread_done, 1, __ATOMIC_RELEASE);
@@ -402,6 +411,37 @@ static void fh_pipe_probe(fh_state_t *st)
     HAL_LOG_INFO("probe: VI state %u %u %u %u %u %u %u -> %u %u %u %u %u %u %u", a[0], a[1], a[2],
                  a[3], a[4], a[5], a[6], b[0], b[1], b[2], b[3], b[4], b[5], b[6]);
     HAL_LOG_INFO("probe: %u frame starts, %u frame ends in 1 s", b[0] - a[0], b[1] - a[1]);
+
+    /*
+     * The AE readbacks, raw, once. divinus records only that GetAeInfo's
+     * word 1 is a gain, word 3 the exposure and word 4 the total gain in
+     * 1/64 units; the other two are unread anywhere. Heap buffers of 1 KiB
+     * so an underestimated struct overruns nothing.
+     */
+    {
+        static const char *names[] = {"API_ISP_GetAeInfo", "API_ISP_GetAeInfo2",
+                                      "API_ISP_GetAeStatus"};
+        int (*fns[3])(void *);
+        unsigned int *w = (unsigned int *)calloc(256, sizeof(unsigned int));
+        int i, rc, last, k;
+
+        fns[0] = st->pipe.fnIspGetAeInfo;
+        fns[1] = st->pipe.fnIspGetAeInfo2;
+        fns[2] = st->pipe.fnIspGetAeStatus;
+        for (i = 0; w && i < 3; i++) {
+            if (!fns[i])
+                continue;
+            memset(w, 0, 256 * sizeof(unsigned int));
+            rc = fns[i](w);
+            for (last = -1, k = 0; k < 256; k++)
+                if (w[k])
+                    last = k;
+            HAL_LOG_INFO("probe: %s rc=%d, %d words written; %u %u %u %u %u %u %u %u %u %u %u %u",
+                         names[i], rc, last + 1, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7],
+                         w[8], w[9], w[10], w[11]);
+        }
+        free(w);
+    }
 }
 
 /* ================================================================
@@ -666,4 +706,127 @@ int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den)
                  "([sensor] mode)",
                  fps_num, fps_den, st->mode->fps);
     return RSS_ERR_NOTSUP;
+}
+
+/* ================================================================
+ * DAY / NIGHT
+ * ================================================================ */
+
+/*
+ * hal_isp_get_exposure -- what ric decides day and night from.
+ *
+ * API_ISP_GetAeInfo, read the way divinus documents it: word 3 the
+ * exposure, word 4 the total gain in 1/64 units, reported here in raptor's
+ * 1/1024 units. No luma field is known on this SDK yet, so only gain and
+ * time are flagged valid and ric runs on gain alone (night_gain /
+ * day_gain_pct). The first reading is logged raw.
+ */
+int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
+{
+    fh_state_t *st = fh_state(ctx);
+    unsigned int *w;
+    int rc;
+
+    if (!st || !exposure)
+        return RSS_ERR_INVAL;
+    if (!st->isp_thread_started)
+        return RSS_ERR_BUSY;
+    if (!st->pipe.fnIspGetAeInfo)
+        return RSS_ERR_NOTSUP;
+
+    w = (unsigned int *)calloc(256, sizeof(unsigned int));
+    if (!w)
+        return RSS_ERR_NOMEM;
+    rc = st->pipe.fnIspGetAeInfo(w);
+    if (rc) {
+        if (!st->exp_warned) {
+            st->exp_warned = true;
+            HAL_LOG_WARN("isp: API_ISP_GetAeInfo failed 0x%x; ric will hold its mode", (unsigned)rc);
+        }
+        free(w);
+        return RSS_ERR_IO;
+    }
+    if (!st->exp_logged) {
+        st->exp_logged = true;
+        HAL_LOG_INFO("isp: first AE reading %u %u %u %u %u %u %u %u", w[0], w[1], w[2], w[3], w[4],
+                     w[5], w[6], w[7]);
+    }
+
+    memset(exposure, 0, sizeof(*exposure));
+    exposure->exposure_time = w[3];
+    exposure->total_gain = w[4] > 0x3FFFFFu ? 0xFFFFFFFFu : w[4] * 16u;
+    exposure->valid_mask = RSS_EXPOSURE_VALID_TIME | RSS_EXPOSURE_VALID_TOTAL_GAIN;
+    free(w);
+    return RSS_OK;
+}
+
+/*
+ * hal_isp_set_running_mode -- swap the ISP tuning, divinus's way: gate the
+ * 3A loop, load <lib>_night_attr.hex or <lib>_attr.hex, put mirror/flip
+ * back (the load resets them), let the loop run again, and ask every video
+ * encoder for an IDR so players resync on the new look.
+ *
+ * The IR-cut filter and the lamps are not this op's business: ric moves
+ * the filter, and the PB4's PWM LEDs are driven outside raptor.
+ */
+int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
+{
+    fh_state_t *st = fh_state(ctx);
+    char path[128];
+    int rc, i, waited;
+
+    if (!st || (mode != RSS_ISP_DAY && mode != RSS_ISP_NIGHT))
+        return RSS_ERR_INVAL;
+    if (!st->isp_inited || !st->isp_thread_started)
+        return RSS_ERR_BUSY;
+    if (mode == st->isp_mode)
+        return RSS_OK;
+
+    snprintf(path, sizeof(path), "/etc/sensors/%s%s", st->snr_lib,
+             mode == RSS_ISP_NIGHT ? "_night_attr.hex" : "_attr.hex");
+    if (access(path, R_OK) != 0) {
+        snprintf(path, sizeof(path), "/usr/lib/sensors/params/%s%s", st->snr_lib,
+                 mode == RSS_ISP_NIGHT ? "_night_attr.hex" : "_attr.hex");
+        if (access(path, R_OK) != 0) {
+            HAL_LOG_WARN("isp: no %s tuning for %s; keeping the current one",
+                         mode == RSS_ISP_NIGHT ? "night" : "day", st->snr_lib);
+            st->isp_mode = mode;
+            return RSS_OK;
+        }
+    }
+
+    __atomic_store_n(&st->isp_pause, 1, __ATOMIC_RELEASE);
+    for (waited = 0; waited < 500 && __atomic_load_n(&st->isp_busy, __ATOMIC_ACQUIRE);
+         waited += 10)
+        fh_sleep_ms(10);
+
+    rc = fh_tuning_load(st, path);
+    if ((st->mirror || st->flip) && st->pipe.fnIspSetMirrorAndflipEx)
+        st->pipe.fnIspSetMirrorAndflipEx(st->mirror, st->flip, 0);
+
+    __atomic_store_n(&st->isp_pause, 0, __ATOMIC_RELEASE);
+    fh_sleep_ms(200);
+
+    for (i = 0; i < FH_VENC_CHN_MAX; i++) {
+        fh_enc_chn_t *enc = &st->enc[i];
+
+        if (enc->created && (enc->codec == RSS_CODEC_H264 || enc->codec == RSS_CODEC_H265))
+            st->pipe.fnVencRequestIdr((unsigned)i);
+    }
+
+    if (rc == RSS_OK)
+        st->isp_mode = mode;
+    HAL_LOG_INFO("isp: %s mode, tuning %s %s", mode == RSS_ISP_NIGHT ? "night" : "day", path,
+                 rc == RSS_OK ? "loaded" : "FAILED");
+    return rc;
+}
+
+int hal_isp_get_running_mode(void *ctx, rss_isp_mode_t *mode)
+{
+    fh_state_t *st = fh_state(ctx);
+
+    if (!st || !mode)
+        return RSS_ERR_INVAL;
+    *mode = st->isp_mode;
+    return RSS_OK;
 }

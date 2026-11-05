@@ -170,7 +170,9 @@ typedef struct {
     int (*fnIspLoadParam)(void *param);
     int (*fnIspSetMirrorAndflipEx)(unsigned int mirror, unsigned int flip, unsigned int bayer);
     int (*fnIspGetVIState)(void *state);
-    int (*fnIspGetAeInfo)(void *info); /* optional */
+    int (*fnIspGetAeInfo)(void *info);   /* optional */
+    int (*fnIspGetAeInfo2)(void *info);  /* optional, probed only */
+    int (*fnIspGetAeStatus)(void *info); /* optional, probed only */
     int (*fnAdvIspInit)(void);
     int (*fnAdvIspSensorInit)(void);
 

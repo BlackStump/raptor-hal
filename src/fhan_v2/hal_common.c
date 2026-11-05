@@ -598,6 +598,9 @@ static const rss_hal_ops_t g_ops = {
     .enc_get_fps = hal_enc_get_fps,
     .enc_get_avg_bitrate = hal_enc_get_avg_bitrate,
 
+    .isp_get_exposure = hal_isp_get_exposure,
+    .isp_set_running_mode = hal_isp_set_running_mode,
+    .isp_get_running_mode = hal_isp_get_running_mode,
     .isp_get_sensor_attr = hal_isp_get_sensor_attr,
     .isp_get_sensor_fps = hal_isp_get_sensor_fps,
     .isp_set_sensor_fps = hal_isp_set_sensor_fps,

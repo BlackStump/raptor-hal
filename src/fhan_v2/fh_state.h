@@ -85,6 +85,10 @@ typedef struct {
     pthread_t isp_thread;
     int isp_thread_run;  /* atomic: the thread keeps calling API_ISP_Run */
     int isp_thread_done; /* atomic: the thread has returned */
+    int isp_pause;       /* atomic: skip API_ISP_Run (tuning swap) */
+    int isp_busy;        /* atomic: inside API_ISP_Run */
+    rss_isp_mode_t isp_mode;
+    bool exp_logged, exp_warned;
     bool isp_thread_started;
 #endif
 
@@ -108,6 +112,9 @@ FH_LOCAL void fh_pipe_stop(fh_state_t *st);
 FH_LOCAL int hal_isp_get_sensor_attr(void *ctx, uint32_t *width, uint32_t *height);
 FH_LOCAL int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den);
 FH_LOCAL int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den);
+FH_LOCAL int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure);
+FH_LOCAL int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode);
+FH_LOCAL int hal_isp_get_running_mode(void *ctx, rss_isp_mode_t *mode);
 
 /* fh_encoder.c */
 FH_LOCAL int fh_enc_init(fh_state_t *st);
