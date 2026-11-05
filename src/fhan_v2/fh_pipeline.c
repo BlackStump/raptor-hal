@@ -187,14 +187,7 @@ int fh_pipe_prepare(fh_state_t *st, const rss_sensor_config_t *snr)
     fh_proc_write("/proc/driver/isp", "cir_off");
     fh_proc_write("/proc/driver/enc", "stm_2621440");
     jpg = (w * h / 2 + 8 + 4095) & ~4095u;
-    /*
-     * Two JPEG channels: raptor runs a snapshot encoder per stream (main and
-     * sub). divinus asked for one ("mem_1_..."), and with that the second
-     * channel's MJPEG attributes were rejected (bench, 2026-11-05:
-     * venc chn 3, 0x800d4080) while the first worked. The size is the main
-     * stream's, so it covers the sub-stream's too.
-     */
-    snprintf(v, sizeof(v), "mem_2_%u", jpg);
+    snprintf(v, sizeof(v), "mem_1_%u", jpg);
     fh_proc_write("/proc/driver/jpeg", v);
     snprintf(v, sizeof(v), "mjpg_%u_%u", 3u * 512 * 1024, 512u * 1024);
     fh_proc_write("/proc/driver/jpeg", v);
