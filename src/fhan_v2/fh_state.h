@@ -71,6 +71,9 @@ typedef struct {
     bool mirror, flip;
 
     int fs_bound_codec[FH_VPSS_CHN_MAX];
+    uint8_t *grab_buf[FH_VPSS_CHN_MAX]; /* raw frame copies for fs_get_frame */
+    size_t grab_cap[FH_VPSS_CHN_MAX];
+    bool grab_logged;
     fh_dim vpss_made[FH_VPSS_CHN_MAX];
     int osd_src_fs[FH_VENC_CHN_MAX];
 
@@ -137,6 +140,9 @@ FH_LOCAL int hal_fs_set_channel_attr(void *ctx, int chn, const rss_fs_config_t *
 FH_LOCAL int hal_fs_enable_channel(void *ctx, int chn);
 FH_LOCAL int hal_fs_disable_channel(void *ctx, int chn);
 FH_LOCAL int hal_fs_destroy_channel(void *ctx, int chn);
+FH_LOCAL int hal_fs_set_frame_depth(void *ctx, int chn, int depth);
+FH_LOCAL int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *info);
+FH_LOCAL int hal_fs_release_frame(void *ctx, int chn, void *frame_data);
 FH_LOCAL int hal_enc_create_group(void *ctx, int grp);
 FH_LOCAL int hal_enc_destroy_group(void *ctx, int grp);
 FH_LOCAL int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);

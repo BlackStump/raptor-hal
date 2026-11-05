@@ -561,6 +561,11 @@ void fh_enc_teardown(fh_state_t *st)
             free(enc->slots[s].buf);
         memset(enc, 0, sizeof(*enc));
     }
+    for (i = 0; i < FH_VPSS_CHN_MAX; i++) {
+        free(st->grab_buf[i]);
+        st->grab_buf[i] = NULL;
+        st->grab_cap[i] = 0;
+    }
     pthread_cond_destroy(&st->enc_cond);
     pthread_mutex_destroy(&st->enc_lock);
     st->enc_sync_ready = false;
@@ -632,6 +637,111 @@ int hal_fs_disable_channel(void *ctx, int chn)
 int hal_fs_destroy_channel(void *ctx, int chn)
 {
     return hal_fs_disable_channel(ctx, chn);
+}
+
+/* ================================================================
+ * RAW FRAMES (rvd "save raw": motion sampling, e.g. wlight)
+ * ================================================================ */
+
+/*
+ * FH_VPSS_GetChnFrame_Ex fills a frame record. Its layout comes from the
+ * FH8852V201 decompile (pavliha/fh8852v201-dump, fh_vpss.h), not yet
+ * checked on the V200:
+ *   [0] Y phys  [1] format  [2] width  [3] height  [4] Y stride
+ *   [5] C stride  [6] size  [7] C phys  [8] Y virt  [9] C virt
+ *   [10..11] pts
+ * So it is checked on every call: width and height must match the
+ * channel's configured size and both virtual addresses must be set, or the
+ * grab fails (and logs the raw words once). The picture is copied out
+ * row by row into one contiguous NV12 buffer, Y then CbCr, so the driver's
+ * buffer is never held and nothing needs releasing.
+ */
+int hal_fs_set_frame_depth(void *ctx, int chn, int depth)
+{
+    fh_state_t *st = fh_state(ctx);
+
+    (void)depth;
+    if (!st || chn < 0 || chn >= FH_VPSS_CHN_MAX)
+        return RSS_ERR_INVAL;
+    return st->pipe.fnVpssGetChnFrame ? RSS_OK : RSS_ERR_NOTSUP;
+}
+
+int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *info)
+{
+    fh_state_t *st = fh_state(ctx);
+    unsigned int w[64];
+    unsigned int width, height, ys, cs, y, need;
+    const uint8_t *py, *pc;
+    uint8_t *dst;
+    int rc;
+
+    if (!st || !frame_data || !info || chn < 0 || chn >= FH_VPSS_CHN_MAX)
+        return RSS_ERR_INVAL;
+    if (!st->pipe.fnVpssGetChnFrame)
+        return RSS_ERR_NOTSUP;
+    if (!st->vpss_open[chn])
+        return RSS_ERR_INVAL;
+
+    memset(w, 0, sizeof(w));
+    rc = st->pipe.fnVpssGetChnFrame((unsigned)chn, w);
+    width = w[2];
+    height = w[3];
+    ys = w[4] ? w[4] : width;
+    cs = w[5] ? w[5] : width;
+    py = (const uint8_t *)(uintptr_t)w[8];
+    pc = (const uint8_t *)(uintptr_t)w[9];
+
+    if (rc || width != st->vpss_dim[chn].width || height != st->vpss_dim[chn].height || !py ||
+        !pc || ys < width || cs < width) {
+        if (!st->grab_logged) {
+            st->grab_logged = true;
+            HAL_LOG_WARN("fs %d: raw grab rc=%d, record %u %u %u %u %u %u %u %u %08x %08x %u %u "
+                         "(expected %ux%u)",
+                         chn, rc, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9],
+                         w[10], w[11], st->vpss_dim[chn].width, st->vpss_dim[chn].height);
+        }
+        return RSS_ERR_IO;
+    }
+
+    need = width * height * 3 / 2;
+    if (st->grab_cap[chn] < need) {
+        uint8_t *b = (uint8_t *)realloc(st->grab_buf[chn], need);
+
+        if (!b)
+            return RSS_ERR_NOMEM;
+        st->grab_buf[chn] = b;
+        st->grab_cap[chn] = need;
+    }
+    dst = st->grab_buf[chn];
+    for (y = 0; y < height; y++)
+        memcpy(dst + (size_t)y * width, py + (size_t)y * ys, width);
+    dst += (size_t)width * height;
+    for (y = 0; y < height / 2; y++)
+        memcpy(dst + (size_t)y * width, pc + (size_t)y * cs, width);
+
+    if (!st->grab_logged) {
+        st->grab_logged = true;
+        HAL_LOG_INFO("fs %d: raw grab %ux%u, format %u, strides %u/%u", chn, width, height, w[1],
+                     ys, cs);
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->width = (uint16_t)width;
+    info->height = (uint16_t)height;
+    info->pixfmt = RSS_PIXFMT_NV12;
+    info->timestamp = fh_now_us();
+    info->virt_addr = st->grab_buf[chn];
+    info->size = need;
+    *frame_data = st->grab_buf[chn];
+    return RSS_OK;
+}
+
+int hal_fs_release_frame(void *ctx, int chn, void *frame_data)
+{
+    (void)ctx;
+    (void)chn;
+    (void)frame_data;
+    return RSS_OK;
 }
 
 /* ================================================================

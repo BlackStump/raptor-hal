@@ -144,6 +144,7 @@ typedef struct {
     int (*fnVpssCloseChn)(unsigned int chn);
 
     int (*fnVpssSetVOMode)(unsigned int chn, unsigned int mode);
+    int (*fnVpssGetChnFrame)(unsigned int chn, void *frame); /* _Ex; raw grabs */
 
     /* SYS binding and VENC (libdsp) */
     int (*fnBind)(unsigned int vpss_chn, unsigned int venc_chn);

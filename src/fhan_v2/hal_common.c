@@ -577,6 +577,9 @@ static const rss_hal_ops_t g_ops = {
     .fs_destroy_channel = hal_fs_destroy_channel,
     .fs_enable_channel = hal_fs_enable_channel,
     .fs_disable_channel = hal_fs_disable_channel,
+    .fs_set_frame_depth = hal_fs_set_frame_depth,
+    .fs_get_frame = hal_fs_get_frame,
+    .fs_release_frame = hal_fs_release_frame,
 
     .enc_create_group = hal_enc_create_group,
     .enc_destroy_group = hal_enc_destroy_group,
