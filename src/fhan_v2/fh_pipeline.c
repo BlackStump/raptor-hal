@@ -257,7 +257,10 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(dsp, "libdsp", p->fnVpssOpenChn, "FH_VPSS_OpenChn", true);
     FH_SYM(dsp, "libdsp", p->fnVpssCloseChn, "FH_VPSS_CloseChn", true);
     FH_SYM(dsp, "libdsp", p->fnVpssSetVOMode, "FH_VPSS_SetVOMode", false);
-    FH_SYM(dsp, "libdsp", p->fnVpssGetChnFrame, "FH_VPSS_GetChnFrame_Ex", false);
+    /* Not the _Ex form: that takes a third argument, a timeout in ms, and
+     * left out it is whatever r2 holds (bench: 0x8009400a). The plain form
+     * is a two-argument wrapper that passes 1000 ms (libdsp 0x69ac). */
+    FH_SYM(dsp, "libdsp", p->fnVpssGetChnFrame, "FH_VPSS_GetChnFrame", false);
     FH_SYM(dsp, "libdsp", p->fnBind, "FH_SYS_BindVpu2Enc", true);
     FH_SYM(dsp, "libdsp", p->fnUnbind, "FH_SYS_UnBindbyDst", true);
     FH_SYM(dsp, "libdsp", p->fnVencCreate, "FH_VENC_CreateChn", true);

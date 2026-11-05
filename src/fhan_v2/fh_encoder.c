@@ -644,7 +644,8 @@ int hal_fs_destroy_channel(void *ctx, int chn)
  * ================================================================ */
 
 /*
- * FH_VPSS_GetChnFrame_Ex fills a frame record. Its layout comes from the
+ * FH_VPSS_GetChnFrame (libdsp's wrapper of _Ex with a 1000 ms timeout)
+ * fills a frame record. Its layout comes from the
  * FH8852V201 decompile (pavliha/fh8852v201-dump, fh_vpss.h), not yet
  * checked on the V200:
  *   [0] Y phys  [1] format  [2] width  [3] height  [4] Y stride
