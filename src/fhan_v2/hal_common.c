@@ -424,6 +424,11 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
 
     snprintf(st->sensor_name, sizeof(st->sensor_name), "%s", cfg->sensors[0].name);
 
+#ifdef HAL_MODULE_VIDEO
+    /* A fault in a stripped vendor library otherwise says nothing. */
+    fh_crash_install();
+#endif
+
     /* Before the first vendor dlopen: RTLD_NOW binds libdsp's mmap at load. */
     fh_check_exports();
 
@@ -442,6 +447,7 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
         goto err_unload;
 #endif
 
+    HAL_LOG_INFO("sys: FH_SYS_Init ...");
     ret = st->sys.fnSysInit();
     if (ret) {
         HAL_LOG_ERR("sys: FH_SYS_Init failed %d (0x%x)", ret, (unsigned)ret);

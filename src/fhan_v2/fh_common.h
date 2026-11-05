@@ -56,6 +56,18 @@
  * So the PMU package field does not identify the part here, and this backend
  * does not decode it. cpuinfo is the kernel's own board name.
  */
+/*
+ * FH_LOCAL -- every function this backend shares between its own files.
+ *
+ * rvd is linked --export-dynamic (the vendor libraries need mmap and
+ * __assert from it), which exports every global symbol it has. A vendor
+ * library that calls one of its *own* functions through the PLT then binds
+ * to the executable's function of the same name instead, if there is one.
+ * Hidden visibility keeps this backend's names out of the dynamic symbol
+ * table; only the bridge (mmap, __assert) is exported on purpose.
+ */
+#define FH_LOCAL __attribute__((visibility("hidden")))
+
 #define FH_CPUINFO "/proc/cpuinfo"
 #define FH_CHIP_PROC "/proc/driver/chip"
 

@@ -40,6 +40,7 @@ HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
 # and only files that exist -- an unwritten file named here fails the build.
 VIDEO_SRCS := $(BACKEND_DIR)/fh_pipeline.c \
               $(BACKEND_DIR)/fh_encoder.c \
+              $(BACKEND_DIR)/fh_crash.c \
               src/hal_gpio.c
 AUDIO_SRCS :=
 endif

@@ -102,46 +102,49 @@ static inline fh_state_t *fh_state(void *ctx)
 
 #ifdef HAL_MODULE_VIDEO
 /* fh_pipeline.c */
-int fh_pipe_prepare(fh_state_t *st, const rss_sensor_config_t *snr);
-int fh_pipe_start(fh_state_t *st);
-void fh_pipe_stop(fh_state_t *st);
-int hal_isp_get_sensor_attr(void *ctx, uint32_t *width, uint32_t *height);
-int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den);
-int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den);
+FH_LOCAL int fh_pipe_prepare(fh_state_t *st, const rss_sensor_config_t *snr);
+FH_LOCAL int fh_pipe_start(fh_state_t *st);
+FH_LOCAL void fh_pipe_stop(fh_state_t *st);
+FH_LOCAL int hal_isp_get_sensor_attr(void *ctx, uint32_t *width, uint32_t *height);
+FH_LOCAL int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den);
+FH_LOCAL int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den);
 
 /* fh_encoder.c */
-int fh_enc_init(fh_state_t *st);
-void fh_enc_teardown(fh_state_t *st);
-int fh_vpss_configure(fh_state_t *st, int chn, unsigned int w, unsigned int h, unsigned int fps);
-void fh_sleep_ms(unsigned int ms);
+FH_LOCAL int fh_enc_init(fh_state_t *st);
+FH_LOCAL void fh_enc_teardown(fh_state_t *st);
+FH_LOCAL int fh_vpss_configure(fh_state_t *st, int chn, unsigned int w, unsigned int h, unsigned int fps);
+FH_LOCAL void fh_sleep_ms(unsigned int ms);
 
-int hal_bind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
-int hal_unbind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
-int hal_fs_create_channel(void *ctx, int chn, const rss_fs_config_t *cfg);
-int hal_fs_set_channel_attr(void *ctx, int chn, const rss_fs_config_t *cfg);
-int hal_fs_enable_channel(void *ctx, int chn);
-int hal_fs_disable_channel(void *ctx, int chn);
-int hal_fs_destroy_channel(void *ctx, int chn);
-int hal_enc_create_group(void *ctx, int grp);
-int hal_enc_destroy_group(void *ctx, int grp);
-int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);
-int hal_enc_destroy_channel(void *ctx, int chn);
-int hal_enc_register_channel(void *ctx, int grp, int chn);
-int hal_enc_unregister_channel(void *ctx, int chn);
-int hal_enc_start(void *ctx, int chn);
-int hal_enc_stop(void *ctx, int chn);
-int hal_enc_poll(void *ctx, int chn, uint32_t timeout_ms);
-int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame);
-int hal_enc_release_frame(void *ctx, int chn, rss_frame_t *frame);
-int hal_enc_request_idr(void *ctx, int chn);
-int hal_enc_set_bitrate(void *ctx, int chn, uint32_t bitrate);
-int hal_enc_set_rc_mode(void *ctx, int chn, rss_rc_mode_t mode, uint32_t bitrate);
-int hal_enc_set_gop(void *ctx, int chn, uint32_t gop_length);
-int hal_enc_set_jpeg_qp(void *ctx, int chn, int qp);
-int hal_enc_get_jpeg_qp(void *ctx, int chn, int *qp);
-int hal_enc_get_fps(void *ctx, int chn, uint32_t *fps_num, uint32_t *fps_den);
-int hal_enc_get_avg_bitrate(void *ctx, int chn, uint32_t *bitrate);
-int hal_sys_get_timestamp(void *ctx, int64_t *ts);
+FH_LOCAL int hal_bind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+FH_LOCAL int hal_unbind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+FH_LOCAL int hal_fs_create_channel(void *ctx, int chn, const rss_fs_config_t *cfg);
+FH_LOCAL int hal_fs_set_channel_attr(void *ctx, int chn, const rss_fs_config_t *cfg);
+FH_LOCAL int hal_fs_enable_channel(void *ctx, int chn);
+FH_LOCAL int hal_fs_disable_channel(void *ctx, int chn);
+FH_LOCAL int hal_fs_destroy_channel(void *ctx, int chn);
+FH_LOCAL int hal_enc_create_group(void *ctx, int grp);
+FH_LOCAL int hal_enc_destroy_group(void *ctx, int grp);
+FH_LOCAL int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);
+FH_LOCAL int hal_enc_destroy_channel(void *ctx, int chn);
+FH_LOCAL int hal_enc_register_channel(void *ctx, int grp, int chn);
+FH_LOCAL int hal_enc_unregister_channel(void *ctx, int chn);
+FH_LOCAL int hal_enc_start(void *ctx, int chn);
+FH_LOCAL int hal_enc_stop(void *ctx, int chn);
+FH_LOCAL int hal_enc_poll(void *ctx, int chn, uint32_t timeout_ms);
+FH_LOCAL int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame);
+FH_LOCAL int hal_enc_release_frame(void *ctx, int chn, rss_frame_t *frame);
+FH_LOCAL int hal_enc_request_idr(void *ctx, int chn);
+FH_LOCAL int hal_enc_set_bitrate(void *ctx, int chn, uint32_t bitrate);
+FH_LOCAL int hal_enc_set_rc_mode(void *ctx, int chn, rss_rc_mode_t mode, uint32_t bitrate);
+FH_LOCAL int hal_enc_set_gop(void *ctx, int chn, uint32_t gop_length);
+FH_LOCAL int hal_enc_set_jpeg_qp(void *ctx, int chn, int qp);
+FH_LOCAL int hal_enc_get_jpeg_qp(void *ctx, int chn, int *qp);
+FH_LOCAL int hal_enc_get_fps(void *ctx, int chn, uint32_t *fps_num, uint32_t *fps_den);
+FH_LOCAL int hal_enc_get_avg_bitrate(void *ctx, int chn, uint32_t *bitrate);
+FH_LOCAL int hal_sys_get_timestamp(void *ctx, int64_t *ts);
+
+/* fh_crash.c */
+FH_LOCAL void fh_crash_install(void);
 #endif
 
 #endif /* FH_STATE_H */
