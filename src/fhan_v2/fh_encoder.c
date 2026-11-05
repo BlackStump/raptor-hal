@@ -645,17 +645,20 @@ int hal_fs_destroy_channel(void *ctx, int chn)
 
 /*
  * FH_VPSS_GetChnFrame (libdsp's wrapper of _Ex with a 1000 ms timeout)
- * fills a frame record. Its layout comes from the
- * FH8852V201 decompile (pavliha/fh8852v201-dump, fh_vpss.h), not yet
- * checked on the V200:
- *   [0] Y phys  [1] format  [2] width  [3] height  [4] Y stride
- *   [5] C stride  [6] size  [7] C phys  [8] Y virt  [9] C virt
- *   [10..11] pts
- * So it is checked on every call: width and height must match the
- * channel's configured size and both virtual addresses must be set, or the
- * grab fails (and logs the raw words once). The picture is copied out
- * row by row into one contiguous NV12 buffer, Y then CbCr, so the driver's
- * buffer is never held and nothing needs releasing.
+ * fills a frame record. Layout measured on the PB4 (2026-11-06), a 640x360
+ * sub-stream grab:
+ *
+ *   [0] 1           format          [6] 235520      Y size (640 x 368)
+ *   [1] 10240       ?               [7] Y phys + 235520   C phys
+ *   [2] 640         width           [8] ...         C virt
+ *   [3] 368         height, padded to 16 rows        [9] 117760  C size
+ *   [4] 0xa37e0000  Y phys          [10..11]        pts
+ *   [5] 0xb5880000  Y virt
+ *
+ * (not the FH8852V201 decompile's order). The planes are packed at the
+ * width, so the stride is the width; the configured height is copied from
+ * the padded one. Width, the padded height and both sizes are checked on
+ * every call; a record that does not fit is logged once and refused.
  */
 int hal_fs_set_frame_depth(void *ctx, int chn, int depth)
 {
@@ -686,20 +689,20 @@ int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *in
     memset(w, 0, sizeof(w));
     rc = st->pipe.fnVpssGetChnFrame((unsigned)chn, w);
     width = w[2];
-    height = w[3];
-    ys = w[4] ? w[4] : width;
-    cs = w[5] ? w[5] : width;
-    py = (const uint8_t *)(uintptr_t)w[8];
-    pc = (const uint8_t *)(uintptr_t)w[9];
+    height = st->vpss_dim[chn].height; /* the picture; w[3] is it padded */
+    ys = width;
+    cs = width;
+    py = (const uint8_t *)(uintptr_t)w[5];
+    pc = (const uint8_t *)(uintptr_t)w[8];
 
-    if (rc || width != st->vpss_dim[chn].width || height != st->vpss_dim[chn].height || !py ||
-        !pc || ys < width || cs < width) {
+    if (rc || width != st->vpss_dim[chn].width || w[3] < height || w[3] > height + 16 || !py ||
+        !pc || w[6] < width * height || w[9] < width * height / 2) {
         if (!st->grab_logged) {
             st->grab_logged = true;
-            HAL_LOG_WARN("fs %d: raw grab rc=%d, record %u %u %u %u %u %u %u %u %08x %08x %u %u "
+            HAL_LOG_WARN("fs %d: raw grab rc=%d, record %u %u %u %u %08x %08x %u %08x %08x %u "
                          "(expected %ux%u)",
                          chn, rc, w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9],
-                         w[10], w[11], st->vpss_dim[chn].width, st->vpss_dim[chn].height);
+                         st->vpss_dim[chn].width, st->vpss_dim[chn].height);
         }
         return RSS_ERR_IO;
     }
@@ -722,8 +725,8 @@ int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *in
 
     if (!st->grab_logged) {
         st->grab_logged = true;
-        HAL_LOG_INFO("fs %d: raw grab %ux%u, format %u, strides %u/%u", chn, width, height, w[1],
-                     ys, cs);
+        HAL_LOG_INFO("fs %d: raw grab %ux%u (buffer %ux%u, format %u)", chn, width, height, width,
+                     w[3], w[0]);
     }
 
     memset(info, 0, sizeof(*info));
