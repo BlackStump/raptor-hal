@@ -960,8 +960,23 @@ static void fh_sat_save_day(fh_state_t *st)
 
 static void fh_colour_set(fh_state_t *st, bool colour)
 {
+    const char *mono = getenv("FH_NIGHT_MONO");
+
     if (!st->pipe.fnIspGetSaturation || !st->pipe.fnIspSetSaturation)
         return;
+    /*
+     * Off unless FH_NIGHT_MONO=1. Bench, 2026-11-05: the manual record with
+     * byte 6, byte 7 or both cleared is grey -- clearing either one alone
+     * removes all colour, so they are not two independent chroma gains --
+     * and every variant also squashes the picture's contrast (blacks lifted
+     * to mid-grey). The record's layout is not understood well enough to
+     * ship; night stays in colour (IR renders pink/purple) until libisp's
+     * API_ISP_SetSaturation is read.
+     */
+    if (!colour && !(mono && *mono == '1')) {
+        fh_sat_log(st, "night");
+        return;
+    }
 
     if (!colour && fh_sat_day_saved) {
         unsigned char *grey = (unsigned char *)malloc(1024);
