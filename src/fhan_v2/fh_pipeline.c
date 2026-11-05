@@ -430,6 +430,30 @@ static void fh_isp_sample_ae(fh_state_t *st)
         }
     }
 
+    /*
+     * Diagnostic, every 2 s: under the night tuning the AE status's exposure
+     * and gain words read 965534 / 4x both covered and in a lit room (luma
+     * 53 vs 127), as if frozen at the values the tuning file loaded.
+     * GetAeInfo is a separate, smaller AE readback (exposure, sensor gain,
+     * ISP gains); logging both side by side, under each tuning and light
+     * level, shows which one follows the scene.
+     */
+    {
+        static int64_t next_trace;
+
+        if (now >= next_trace && st->pipe.fnIspGetAeInfo) {
+            unsigned int ai[64];
+
+            next_trace = now + 2000000;
+            memset(ai, 0, sizeof(ai));
+            st->pipe.fnIspGetAeInfo(ai);
+            HAL_LOG_INFO("aetrace %s: luma %llu | info %u %u %u %u | status w1 %u w2 %u w3 %u w4 %u "
+                         "w6 %u w8 %u",
+                         st->isp_mode == RSS_ISP_NIGHT ? "night" : "day", luma, ai[0], ai[1], ai[2],
+                         ai[3], w[1], w[2], w[3], w[4], w[6], w[8]);
+        }
+    }
+
     if (!st->exp_logged) {
         st->exp_logged = true;
         HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, "
