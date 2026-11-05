@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <string.h>
 #include <ucontext.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 static void fh_put(const char *s)
@@ -48,10 +49,66 @@ static void fh_puthex(const char *label, unsigned long v)
     fh_put(b);
 }
 
+#define FH_MAX_RANGES 40
+
+static unsigned long fh_lo[FH_MAX_RANGES], fh_hi[FH_MAX_RANGES];
+static char fh_names[FH_MAX_RANGES][48];
+static int fh_nranges;
+
+static unsigned long fh_parse_hex(const char *p, const char **end)
+{
+    unsigned long v = 0;
+
+    for (;; p++) {
+        char c = *p;
+
+        if (c >= '0' && c <= '9')
+            v = v * 16 + (unsigned long)(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            v = v * 16 + (unsigned long)(c - 'a' + 10);
+        else
+            break;
+    }
+    *end = p;
+    return v;
+}
+
+/* Remember an executable mapping and print it. */
+static void fh_note_range(char *line)
+{
+    const char *p;
+    unsigned long lo, hi;
+    char *name;
+
+    lo = fh_parse_hex(line, &p);
+    if (*p != '-')
+        return;
+    hi = fh_parse_hex(p + 1, &p);
+    fh_put(line);
+    if (fh_nranges >= FH_MAX_RANGES)
+        return;
+    name = strrchr(line, '/');
+    name = name ? name + 1 : strrchr(line, ' ');
+    fh_lo[fh_nranges] = lo;
+    fh_hi[fh_nranges] = hi;
+    if (name) {
+        size_t n = strlen(name);
+
+        if (n && name[n - 1] == '\n')
+            n--;
+        if (n > sizeof(fh_names[0]) - 1)
+            n = sizeof(fh_names[0]) - 1;
+        memcpy(fh_names[fh_nranges], name, n);
+        fh_names[fh_nranges][n] = 0;
+    }
+    fh_nranges++;
+}
+
 static void fh_crash_handler(int sig, siginfo_t *si, void *uc_v)
 {
     char buf[512];
-    int fd;
+    unsigned long sp = 0;
+    int fd, i, printed = 0;
     ssize_t n;
 
     fh_put("\n*** rvd: fatal signal ");
@@ -64,37 +121,65 @@ static void fh_crash_handler(int sig, siginfo_t *si, void *uc_v)
         fh_puthex(", pc ", uc->uc_mcontext.arm_pc);
         fh_puthex(", lr ", uc->uc_mcontext.arm_lr);
         fh_puthex(", sp ", uc->uc_mcontext.arm_sp);
+        fh_puthex("\n*** r0 ", uc->uc_mcontext.arm_r0);
+        fh_puthex(" r1 ", uc->uc_mcontext.arm_r1);
+        fh_puthex(" r2 ", uc->uc_mcontext.arm_r2);
+        fh_puthex(" r3 ", uc->uc_mcontext.arm_r3);
+        sp = uc->uc_mcontext.arm_sp;
     }
 #else
     (void)uc_v;
 #endif
+    fh_puthex(", tid ", (unsigned long)syscall(SYS_gettid));
     fh_put("\n*** executable mappings:\n");
 
     fd = open("/proc/self/maps", O_RDONLY);
     if (fd >= 0) {
-        /* Line filtering on a raw buffer: print lines whose permissions
-         * field has an x. Lines split across reads are printed whole by
-         * carrying the remainder. */
         char line[256];
         size_t ll = 0;
 
         while ((n = read(fd, buf, sizeof(buf))) > 0) {
-            ssize_t i;
+            ssize_t k;
 
-            for (i = 0; i < n; i++) {
+            for (k = 0; k < n; k++) {
                 if (ll < sizeof(line) - 1)
-                    line[ll++] = buf[i];
-                if (buf[i] == '\n') {
-                    char *sp = memchr(line, ' ', ll);
+                    line[ll++] = buf[k];
+                if (buf[k] == '\n') {
+                    char *sp_ = memchr(line, ' ', ll);
 
                     line[ll] = 0;
-                    if (sp && sp + 3 < line + ll && sp[3] == 'x')
-                        fh_put(line);
+                    if (sp_ && sp_ + 3 < line + ll && sp_[3] == 'x')
+                        fh_note_range(line);
                     ll = 0;
                 }
             }
         }
         close(fd);
+    }
+
+    /*
+     * No unwinder: lr was clobbered by the copy routine, so walk the stack
+     * and print every word that points into executable code. The first few
+     * are the return addresses of the frames that led here.
+     */
+    if (sp) {
+        fh_put("*** code addresses on the stack (sp+offset: library+offset):\n");
+        for (i = 0; i < 2048 && printed < 24; i++) {
+            unsigned long v = ((unsigned long *)sp)[i];
+            int r;
+
+            for (r = 0; r < fh_nranges; r++) {
+                if (v >= fh_lo[r] && v < fh_hi[r]) {
+                    fh_puthex("    sp+", (unsigned long)i * 4);
+                    fh_put(": ");
+                    fh_put(fh_names[r]);
+                    fh_puthex("+", v - fh_lo[r]);
+                    fh_put("\n");
+                    printed++;
+                    break;
+                }
+            }
+        }
     }
 
     signal(sig, SIG_DFL);

@@ -42,6 +42,9 @@
 #include <string.h>
 #include <time.h>
 
+extern long syscall(long number, ...);
+#include <sys/syscall.h>
+
 static int64_t fh_now_us(void)
 {
     struct timespec ts;
@@ -240,6 +243,8 @@ static void *fh_collect_thread(void *arg)
     fh_venc_strm strm;
     fh_piece pc[40];
     int64_t last_drop_log = 0;
+
+    HAL_LOG_INFO("venc: collector thread tid %ld", syscall(SYS_gettid));
 
     while (__atomic_load_n(&st->collect_run, __ATOMIC_ACQUIRE)) {
         unsigned int chn, npc = 0, i;

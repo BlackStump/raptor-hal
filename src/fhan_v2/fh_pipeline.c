@@ -38,6 +38,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+extern long syscall(long number, ...);
+#include <sys/syscall.h>
 #include <unistd.h>
 
 /* ================================================================
@@ -399,6 +402,8 @@ static void fh_isp_sample_ae(fh_state_t *st)
 static void *fh_isp_thread(void *arg)
 {
     fh_state_t *st = (fh_state_t *)arg;
+
+    HAL_LOG_INFO("isp: 3A thread tid %ld", syscall(SYS_gettid));
 
     while (__atomic_load_n(&st->isp_thread_run, __ATOMIC_ACQUIRE)) {
         /* divinus's gate: a tuning load must not race the 3A loop. */
