@@ -715,47 +715,70 @@ int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den)
 /*
  * hal_isp_get_exposure -- what ric decides day and night from.
  *
- * API_ISP_GetAeInfo, read the way divinus documents it: word 3 the
- * exposure, word 4 the total gain in 1/64 units, reported here in raptor's
- * 1/1024 units. No luma field is known on this SDK yet, so only gain and
- * time are flagged valid and ric runs on gain alone (night_gain /
- * day_gain_pct). The first reading is logged raw.
+ * Measured on M2 (2026-11-05), lit room vs lens covered, ~1 s after start:
+ *
+ *   GetAeInfo    4 words   875 256 64 64        -> 4853 1024 64 256
+ *   GetAeInfo2   5 words   875 256 256 64 64    -> 4853 256 1024 64 256
+ *   GetAeStatus 54 words   535124312 19555 4194304 64 64 ...
+ *                       -> 28846662 24000 16777216 4853 19412 ...
+ *
+ * divinus's note for GetAeInfo (word 3 exposure, word 4 total gain) does not
+ * hold on this build: it writes four words, so word 4 is always 0. What the
+ * numbers do support, provisionally:
+ *
+ *   GetAeStatus word 0 / (width * height)  -> mean luma, 145 lit, 7.8 dark:
+ *       an 8-bit mean over the full picture is exactly the scale that gives
+ *   GetAeStatus word 2 >> 12               -> total gain, 1024 at 2^22, the
+ *       lit room's value; 4096 covered
+ *
+ * Both are flagged valid, so ric runs its luma+gain hybrid. ric's night->day
+ * test is a ratio against its own night baseline, so the gain's absolute
+ * scale does not matter there; only night_gain (if set) would care. The
+ * raw words are logged on the first call.
  */
 int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
 {
     fh_state_t *st = fh_state(ctx);
     unsigned int *w;
+    unsigned long long area, luma;
     int rc;
 
     if (!st || !exposure)
         return RSS_ERR_INVAL;
-    if (!st->isp_thread_started)
+    if (!st->isp_thread_started || !st->mode)
         return RSS_ERR_BUSY;
-    if (!st->pipe.fnIspGetAeInfo)
+    if (!st->pipe.fnIspGetAeStatus)
         return RSS_ERR_NOTSUP;
 
     w = (unsigned int *)calloc(256, sizeof(unsigned int));
     if (!w)
         return RSS_ERR_NOMEM;
-    rc = st->pipe.fnIspGetAeInfo(w);
+    rc = st->pipe.fnIspGetAeStatus(w);
     if (rc) {
         if (!st->exp_warned) {
             st->exp_warned = true;
-            HAL_LOG_WARN("isp: API_ISP_GetAeInfo failed 0x%x; ric will hold its mode", (unsigned)rc);
+            HAL_LOG_WARN("isp: API_ISP_GetAeStatus failed 0x%x; ric will hold its mode",
+                         (unsigned)rc);
         }
         free(w);
         return RSS_ERR_IO;
     }
+
+    area = (unsigned long long)st->mode->width * st->mode->height;
+    luma = area ? w[0] / area : 0;
+    if (luma > 255)
+        luma = 255;
+
     if (!st->exp_logged) {
         st->exp_logged = true;
-        HAL_LOG_INFO("isp: first AE reading %u %u %u %u %u %u %u %u", w[0], w[1], w[2], w[3], w[4],
-                     w[5], w[6], w[7]);
+        HAL_LOG_INFO("isp: first AE status %u %u %u %u %u %u %u %u %u -> luma %llu, gain %u", w[0],
+                     w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], luma, w[2] >> 12);
     }
 
     memset(exposure, 0, sizeof(*exposure));
-    exposure->exposure_time = w[3];
-    exposure->total_gain = w[4] > 0x3FFFFFu ? 0xFFFFFFFFu : w[4] * 16u;
-    exposure->valid_mask = RSS_EXPOSURE_VALID_TIME | RSS_EXPOSURE_VALID_TOTAL_GAIN;
+    exposure->ae_luma = (uint32_t)luma;
+    exposure->total_gain = w[2] >> 12;
+    exposure->valid_mask = RSS_EXPOSURE_VALID_AE_LUMA | RSS_EXPOSURE_VALID_TOTAL_GAIN;
     free(w);
     return RSS_OK;
 }
