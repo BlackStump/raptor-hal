@@ -236,14 +236,50 @@ static bool fh_file_frame(fh_state_t *st, int chn, const fh_piece *pc, unsigned 
     return dropped;
 }
 
+/*
+ * fh_map_find -- the mapping that contains addr, from /proc/self/maps.
+ *
+ * Bench, 2026-11-05: the collector's memcpy faulted reading the first byte
+ * past the end of the mapping holding a NAL, on a frame whose NAL lengths
+ * were consistent with the frame's own size (big, noisy frames under the
+ * night tuning). That is a NAL running off the end of the encoder's
+ * stream buffer -- a wrap -- and nothing in the stream header marks it.
+ * The collector therefore checks every NAL against the mapping it starts
+ * in before copying it.
+ */
+static int fh_map_find(uintptr_t addr, uintptr_t *lo, uintptr_t *hi)
+{
+    char line[256];
+    FILE *f = fopen("/proc/self/maps", "r");
+    int found = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long a, b;
+
+        if (sscanf(line, "%lx-%lx", &a, &b) != 2)
+            continue;
+        if (addr >= a && addr < b) {
+            *lo = a;
+            *hi = b;
+            found = 0;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
 static void *fh_collect_thread(void *arg)
 {
     fh_state_t *st = (fh_state_t *)arg;
     const unsigned int mask = FH_CODEC_H264 | FH_CODEC_H265 | FH_CODEC_MJPEG;
     fh_venc_strm strm;
     fh_piece pc[40];
-    int64_t last_drop_log = 0, last_bad_log = 0;
-    unsigned int bad_frames = 0;
+    int64_t last_drop_log = 0, last_bad_log = 0, last_wrap_log = 0;
+    unsigned int bad_frames = 0, wrap_frames = 0;
+    uintptr_t map_lo = 0, map_hi = 0;
 
     HAL_LOG_INFO("venc: collector thread tid %ld", syscall(SYS_gettid));
 
@@ -276,13 +312,54 @@ static void *fh_collect_thread(void *arg)
             unsigned long long total = 0;
 
             for (i = 0; i < n; i++) {
-                if (!strm.nalu[i].addr || !strm.nalu[i].length)
+                uintptr_t a = (uintptr_t)strm.nalu[i].addr;
+                size_t len = strm.nalu[i].length;
+
+                if (!a || !len)
                     continue;
-                pc[npc].data = (const uint8_t *)(uintptr_t)strm.nalu[i].addr;
-                pc[npc].len = strm.nalu[i].length;
-                total += strm.nalu[i].length;
+
+                /* Inside the mapping it starts in, or not copied at all. */
+                if (a < map_lo || a >= map_hi) {
+                    if (fh_map_find(a, &map_lo, &map_hi)) {
+                        map_lo = map_hi = 0;
+                        HAL_LOG_WARN("venc chn %u: NAL at %08lx is in no mapping; frame dropped",
+                                     strm.field04, (unsigned long)a);
+                        npc = 0;
+                        wrap_frames++;
+                        break;
+                    }
+                    HAL_LOG_INFO("venc: stream data mapping %08lx-%08lx (%lu KiB)",
+                                 (unsigned long)map_lo, (unsigned long)map_hi,
+                                 (unsigned long)((map_hi - map_lo) / 1024));
+                }
+                if (len > map_hi - a) {
+                    int64_t now = fh_now_us();
+
+                    wrap_frames++;
+                    if (now - last_wrap_log > 2000000) {
+                        last_wrap_log = now;
+                        HAL_LOG_WARN("venc chn %u: NAL %u (type %u, %zu bytes at %08lx) runs %zu "
+                                     "bytes past the end of its mapping %08lx-%08lx; frame "
+                                     "dropped (%u so far). header %08x %08x %08x %08x %08x "
+                                     "nalu_cnt %u",
+                                     strm.field04, i, strm.nalu[i].type, len, (unsigned long)a,
+                                     len - (size_t)(map_hi - a), (unsigned long)map_lo,
+                                     (unsigned long)map_hi, wrap_frames, strm.field08,
+                                     strm.field0c, strm.field10, strm.field14, strm.field18,
+                                     strm.nalu_cnt);
+                    }
+                    npc = 0;
+                    break;
+                }
+
+                pc[npc].data = (const uint8_t *)a;
+                pc[npc].len = len;
+                total += len;
                 npc++;
             }
+            if (!npc && n && chn < FH_VENC_CHN_MAX &&
+                (st->enc[chn].codec == RSS_CODEC_H264 || st->enc[chn].codec == RSS_CODEC_H265))
+                st->pipe.fnVencRequestIdr(chn);
 
             /*
              * Bench, 2026-11-05: the collector died in memcpy reading past
@@ -327,8 +404,8 @@ static void *fh_collect_thread(void *arg)
                          chn, strm.type, strm.field04, strm.field08, strm.field0c, strm.field10,
                          strm.field14, strm.field18, strm.nalu_cnt);
             for (i = 0; i < npc && i < 4; i++)
-                HAL_LOG_INFO("venc chn %u:   piece %u: %zu bytes, %02x %02x %02x %02x %02x", chn,
-                             i, pc[i].len, pc[i].len > 0 ? pc[i].data[0] : 0,
+                HAL_LOG_INFO("venc chn %u:   piece %u: %zu bytes at %p, %02x %02x %02x %02x %02x",
+                             chn, i, pc[i].len, (const void *)pc[i].data, pc[i].len > 0 ? pc[i].data[0] : 0,
                              pc[i].len > 1 ? pc[i].data[1] : 0, pc[i].len > 2 ? pc[i].data[2] : 0,
                              pc[i].len > 3 ? pc[i].data[3] : 0, pc[i].len > 4 ? pc[i].data[4] : 0);
         }
@@ -355,8 +432,9 @@ static void *fh_collect_thread(void *arg)
         }
     }
 
-    if (bad_frames)
-        HAL_LOG_WARN("venc: %u frame(s) dropped as inconsistent", bad_frames);
+    if (bad_frames || wrap_frames)
+        HAL_LOG_WARN("venc: frames dropped: %u inconsistent, %u past their mapping", bad_frames,
+                     wrap_frames);
     __atomic_store_n(&st->collect_done, 1, __ATOMIC_RELEASE);
     return NULL;
 }
