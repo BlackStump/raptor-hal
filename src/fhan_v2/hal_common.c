@@ -477,7 +477,7 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
     ret = fh_pipe_start(st);
     if (ret)
         goto err_unload;
-    HAL_LOG_INFO("hal_init: sensor and ISP up; framesources and encoders are Phase 2b");
+    HAL_LOG_INFO("hal_init: sensor and ISP up");
 #else
     HAL_LOG_INFO("hal_init: SDK up to FH_SYS_Init");
 #endif
@@ -562,6 +562,36 @@ static const rss_hal_ops_t g_ops = {
     .sys_get_cpu_info = hal_sys_get_cpu_info,
 
 #ifdef HAL_MODULE_VIDEO
+    .sys_get_timestamp = hal_sys_get_timestamp,
+    .bind = hal_bind,
+    .unbind = hal_unbind,
+
+    .fs_create_channel = hal_fs_create_channel,
+    .fs_set_channel_attr = hal_fs_set_channel_attr,
+    .fs_destroy_channel = hal_fs_destroy_channel,
+    .fs_enable_channel = hal_fs_enable_channel,
+    .fs_disable_channel = hal_fs_disable_channel,
+
+    .enc_create_group = hal_enc_create_group,
+    .enc_destroy_group = hal_enc_destroy_group,
+    .enc_create_channel = hal_enc_create_channel,
+    .enc_destroy_channel = hal_enc_destroy_channel,
+    .enc_register_channel = hal_enc_register_channel,
+    .enc_unregister_channel = hal_enc_unregister_channel,
+    .enc_start = hal_enc_start,
+    .enc_stop = hal_enc_stop,
+    .enc_poll = hal_enc_poll,
+    .enc_get_frame = hal_enc_get_frame,
+    .enc_release_frame = hal_enc_release_frame,
+    .enc_request_idr = hal_enc_request_idr,
+    .enc_set_rc_mode = hal_enc_set_rc_mode,
+    .enc_set_bitrate = hal_enc_set_bitrate,
+    .enc_set_gop = hal_enc_set_gop,
+    .enc_set_jpeg_qp = hal_enc_set_jpeg_qp,
+    .enc_get_jpeg_qp = hal_enc_get_jpeg_qp,
+    .enc_get_fps = hal_enc_get_fps,
+    .enc_get_avg_bitrate = hal_enc_get_avg_bitrate,
+
     .isp_get_sensor_attr = hal_isp_get_sensor_attr,
     .isp_get_sensor_fps = hal_isp_get_sensor_fps,
     .isp_set_sensor_fps = hal_isp_set_sensor_fps,

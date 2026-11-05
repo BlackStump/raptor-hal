@@ -32,12 +32,14 @@ SDK_INCLUDE :=
 BACKEND_DIR := src/fhan_v2
 HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
 
+# Phase 2b adds fh_encoder.c (framesources, encoders, stream delivery).
 # Phase 2a adds fh_pipeline.c (sensor, ISP, VPSS channel 0).
 # Phase 1: the skeleton. hal_common.c is HAL_COMMON_SRC (compiled into both
 # archives); hal_gpio.c is vendor-neutral sysfs and the only video op that
 # owes nothing to the vendor SDK. Each later phase adds the files it writes,
 # and only files that exist -- an unwritten file named here fails the build.
 VIDEO_SRCS := $(BACKEND_DIR)/fh_pipeline.c \
+              $(BACKEND_DIR)/fh_encoder.c \
               src/hal_gpio.c
 AUDIO_SRCS :=
 endif

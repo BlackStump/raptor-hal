@@ -28,6 +28,86 @@ typedef struct {
     unsigned int height;
 } fh_dim;
 
+/* Encoder channels (divinus F2_VENC_CHN_NUM). */
+#define FH_VENC_CHN_MAX 8
+
+/* Codec bits, as FH_VENC_CreateChn's capability mask and the channel
+ * attribute's first word (divinus f2_common.h). */
+#define FH_CODEC_JPEG 0x01u
+#define FH_CODEC_MJPEG 0x02u
+#define FH_CODEC_H264 0x04u
+#define FH_CODEC_H265 0x10u
+
+/* Rate-control modes (divinus f2_common.h). */
+#define FH_RC_H264VBR 3u
+#define FH_RC_H264CBR 4u
+#define FH_RC_H264FIXQP 5u
+#define FH_RC_H265VBR 7u
+#define FH_RC_H265CBR 8u
+
+/* FH_VENC_CreateChn payload. */
+typedef struct {
+    unsigned int types;
+    unsigned int width;
+    unsigned int height;
+    unsigned int b_frames;
+} fh_venc_cap;
+
+/* Rate control, the tail of the channel attribute and FH_VENC_SetRCAttr's
+ * payload. Layouts per mode are in fh_encoder.c. */
+typedef struct {
+    unsigned int mode;
+    unsigned int param[21];
+} fh_venc_rc;
+
+/* FH_VENC_SetChnAttr payload for H.264/H.265, 0xac bytes. */
+typedef struct {
+    unsigned int codec;
+    unsigned int profile; /* H.264 66/77/100; H.265 1 */
+    unsigned int gop;
+    unsigned int width;
+    unsigned int height;
+    unsigned int reserved[16];
+    fh_venc_rc rate;
+} fh_venc_attr;
+
+/* The same buffer for MJPEG (divinus f2_venc_mjpegattr, driver-confirmed). */
+typedef struct {
+    unsigned int codec;
+    unsigned int width;
+    unsigned int height;
+    unsigned int rotate;
+    unsigned int enc_speed;
+    unsigned int reserved[16];
+    unsigned int mode; /* 0 = fixed QP */
+    unsigned int qp;
+    unsigned short frame_num;
+    unsigned short frame_time;
+    unsigned int reserved2[40];
+} fh_venc_mjpeg_attr;
+
+/* FH_VENC_GetStream output, V200 (divinus f2_venc_strm). field04 is the
+ * channel; MJPEG puts its picture at field08/field0c instead of a NALU
+ * list. The other words are logged on each channel's first frame. */
+typedef struct {
+    unsigned int type;
+    unsigned int length;
+    unsigned int addr;
+} fh_venc_nalu;
+
+typedef struct {
+    unsigned int type;
+    unsigned int field04;
+    unsigned int field08;
+    unsigned int field0c;
+    unsigned int field10;
+    unsigned int field14;
+    unsigned int field18;
+    unsigned int nalu_cnt;
+    fh_venc_nalu nalu[40];
+    unsigned int tail[48];
+} fh_venc_strm;
+
 /* FH_VPSS_SetFramectrl payload (divinus f2_vpss_framectrl). */
 typedef struct {
     unsigned short src_fps;
@@ -62,6 +142,20 @@ typedef struct {
     int (*fnVpssSetFramectrl)(unsigned int chn, fh_vpss_framectrl *ctrl);
     int (*fnVpssOpenChn)(unsigned int chn);
     int (*fnVpssCloseChn)(unsigned int chn);
+
+    int (*fnVpssSetVOMode)(unsigned int chn, unsigned int mode);
+
+    /* SYS binding and VENC (libdsp) */
+    int (*fnBind)(unsigned int vpss_chn, unsigned int venc_chn);
+    int (*fnUnbind)(unsigned int venc_chn);
+    int (*fnVencCreate)(unsigned int chn, fh_venc_cap *cap);
+    int (*fnVencGetStream)(unsigned int type_mask, fh_venc_strm *strm);
+    int (*fnVencRelease)(unsigned int chn);
+    int (*fnVencRequestIdr)(unsigned int chn);
+    int (*fnVencSetAttr)(unsigned int chn, void *attr);
+    int (*fnVencSetRc)(unsigned int chn, fh_venc_rc *rc);
+    int (*fnVencStart)(unsigned int chn);
+    int (*fnVencStop)(unsigned int chn);
 
     /* ISP (libisp, libadvapi_isp) */
     int (*fnIspMemInit)(unsigned int width, unsigned int height);

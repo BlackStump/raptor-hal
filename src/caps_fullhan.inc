@@ -4,11 +4,10 @@
  * Included from the #else arm of caps_hisilicon.inc's platform chain, and so
  * owns the unknown-platform #error. Fork-local; see FORK.md.
  *
- * A capability flag is a promise that an op exists to service it. Phase 1
- * publishes no pipeline ops, so every encoder, JPEG and ISP flag is false and
- * every count is 0 -- rvd reads that as "this platform cannot", which is
- * exactly true until Phase 2. Each flag rises in the commit that publishes its
- * op, and each number only once it has been measured on the PB4.
+ * A capability flag is a promise that an op exists to service it. Phase 2b
+ * publishes the encoder: H.264, H.265 and MJPEG-backed JPEG, bitrate changes,
+ * 8 VENC and 3 VPSS output channels (divinus's counts for the V200). ISP
+ * tuning flags stay false until their ops exist.
  */
 
 #if defined(PLATFORM_FH8852V200)
@@ -16,14 +15,14 @@ const rss_hal_caps_t g_hal_caps = {
     .soc_name = HAL_PLATFORM_NAME,
     .sdk_version = "Fullhan MPI",
 
-    .has_h265 = false,
+    .has_h265 = true,
     .has_rotation = false,
-    .has_set_bitrate = false,
+    .has_set_bitrate = true,
     .has_gop_attr = false,
     .has_capped_rc = false,
     .has_smart_rc = false,
 
-    .has_jpeg = false,
+    .has_jpeg = true,
     .has_jpeg_qp = false,
     .jpeg_pulse = false,
 
@@ -35,8 +34,8 @@ const rss_hal_caps_t g_hal_caps = {
     .has_ae_comp = false,
 
     .max_sensors = 1,
-    .max_enc_channels = 0,
-    .max_fs_channels = 0,
+    .max_enc_channels = 8,
+    .max_fs_channels = 3,
     .max_enc_pixel_rate = 0,
 
     .max_osd_regions = 0,

@@ -20,6 +20,41 @@ typedef struct {
     int (*fnSysGetChipId)(void *id); /* optional */
 } fh_sys_impl;
 
+#ifdef HAL_MODULE_VIDEO
+#define FH_ENC_QDEPTH 3
+#define FH_ENC_MAX_NALS 16
+
+/* One encoded frame, copied out of the driver's buffer. */
+typedef struct {
+    uint8_t *buf;
+    size_t len, cap;
+    rss_nal_unit_t nals[FH_ENC_MAX_NALS];
+    uint32_t nal_count;
+    int64_t ts;
+    uint32_t seq;
+    bool key;
+} fh_frame_t;
+
+typedef struct {
+    bool created, receiving, started, made;
+    rss_codec_t codec;
+    unsigned int fh_codec;
+    unsigned int width, height, made_w, made_h;
+    uint32_t fps_num, fps_den, gop, bitrate;
+    rss_rc_mode_t rc_mode;
+    int init_qp, jpeg_quality, profile;
+    int bound_fs;
+
+    /* slots[] hold frames; q[] is the FIFO of slot indexes; held is the
+     * slot rvd has checked out, -1 if none. */
+    fh_frame_t slots[FH_ENC_QDEPTH + 1];
+    int q[FH_ENC_QDEPTH];
+    int q_head, q_count, held;
+    uint32_t seq, drops;
+    bool first_logged, sc_logged;
+} fh_enc_chn_t;
+#endif
+
 typedef struct {
     fh_sys_impl sys;
     bool sys_inited;
@@ -34,6 +69,18 @@ typedef struct {
     fh_dim vpss_dim[FH_VPSS_CHN_MAX];
     int vpss_count;
     bool mirror, flip;
+
+    int fs_bound_codec[FH_VPSS_CHN_MAX];
+    fh_dim vpss_made[FH_VPSS_CHN_MAX];
+    int osd_src_fs[FH_VENC_CHN_MAX];
+
+    fh_enc_chn_t enc[FH_VENC_CHN_MAX];
+    pthread_mutex_t enc_lock;
+    pthread_cond_t enc_cond;
+    bool enc_sync_ready;
+    pthread_t collect_thread;
+    int collect_run, collect_done;
+    bool collect_started;
 
     pthread_t isp_thread;
     int isp_thread_run;  /* atomic: the thread keeps calling API_ISP_Run */
@@ -61,6 +108,40 @@ void fh_pipe_stop(fh_state_t *st);
 int hal_isp_get_sensor_attr(void *ctx, uint32_t *width, uint32_t *height);
 int hal_isp_get_sensor_fps(void *ctx, uint32_t *fps_num, uint32_t *fps_den);
 int hal_isp_set_sensor_fps(void *ctx, uint32_t fps_num, uint32_t fps_den);
+
+/* fh_encoder.c */
+int fh_enc_init(fh_state_t *st);
+void fh_enc_teardown(fh_state_t *st);
+int fh_vpss_configure(fh_state_t *st, int chn, unsigned int w, unsigned int h, unsigned int fps);
+void fh_sleep_ms(unsigned int ms);
+
+int hal_bind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+int hal_unbind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+int hal_fs_create_channel(void *ctx, int chn, const rss_fs_config_t *cfg);
+int hal_fs_set_channel_attr(void *ctx, int chn, const rss_fs_config_t *cfg);
+int hal_fs_enable_channel(void *ctx, int chn);
+int hal_fs_disable_channel(void *ctx, int chn);
+int hal_fs_destroy_channel(void *ctx, int chn);
+int hal_enc_create_group(void *ctx, int grp);
+int hal_enc_destroy_group(void *ctx, int grp);
+int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);
+int hal_enc_destroy_channel(void *ctx, int chn);
+int hal_enc_register_channel(void *ctx, int grp, int chn);
+int hal_enc_unregister_channel(void *ctx, int chn);
+int hal_enc_start(void *ctx, int chn);
+int hal_enc_stop(void *ctx, int chn);
+int hal_enc_poll(void *ctx, int chn, uint32_t timeout_ms);
+int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame);
+int hal_enc_release_frame(void *ctx, int chn, rss_frame_t *frame);
+int hal_enc_request_idr(void *ctx, int chn);
+int hal_enc_set_bitrate(void *ctx, int chn, uint32_t bitrate);
+int hal_enc_set_rc_mode(void *ctx, int chn, rss_rc_mode_t mode, uint32_t bitrate);
+int hal_enc_set_gop(void *ctx, int chn, uint32_t gop_length);
+int hal_enc_set_jpeg_qp(void *ctx, int chn, int qp);
+int hal_enc_get_jpeg_qp(void *ctx, int chn, int *qp);
+int hal_enc_get_fps(void *ctx, int chn, uint32_t *fps_num, uint32_t *fps_den);
+int hal_enc_get_avg_bitrate(void *ctx, int chn, uint32_t *bitrate);
+int hal_sys_get_timestamp(void *ctx, int64_t *ts);
 #endif
 
 #endif /* FH_STATE_H */

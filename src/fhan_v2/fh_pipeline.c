@@ -62,7 +62,7 @@ static const fh_snr_mode fh_snr_modes[] = {
 
 #define FH_N_MODES (sizeof(fh_snr_modes) / sizeof(fh_snr_modes[0]))
 
-static void fh_sleep_ms(unsigned int ms)
+void fh_sleep_ms(unsigned int ms)
 {
     struct timespec ts;
 
@@ -253,6 +253,17 @@ static int fh_pipe_open_libs(fh_state_t *st)
     FH_SYM(dsp, "libdsp", p->fnVpssSetFramectrl, "FH_VPSS_SetFramectrl", true);
     FH_SYM(dsp, "libdsp", p->fnVpssOpenChn, "FH_VPSS_OpenChn", true);
     FH_SYM(dsp, "libdsp", p->fnVpssCloseChn, "FH_VPSS_CloseChn", true);
+    FH_SYM(dsp, "libdsp", p->fnVpssSetVOMode, "FH_VPSS_SetVOMode", false);
+    FH_SYM(dsp, "libdsp", p->fnBind, "FH_SYS_BindVpu2Enc", true);
+    FH_SYM(dsp, "libdsp", p->fnUnbind, "FH_SYS_UnBindbyDst", true);
+    FH_SYM(dsp, "libdsp", p->fnVencCreate, "FH_VENC_CreateChn", true);
+    FH_SYM(dsp, "libdsp", p->fnVencGetStream, "FH_VENC_GetStream", true);
+    FH_SYM(dsp, "libdsp", p->fnVencRelease, "FH_VENC_ReleaseStream", true);
+    FH_SYM(dsp, "libdsp", p->fnVencRequestIdr, "FH_VENC_RequestIDR", true);
+    FH_SYM(dsp, "libdsp", p->fnVencSetAttr, "FH_VENC_SetChnAttr", true);
+    FH_SYM(dsp, "libdsp", p->fnVencSetRc, "FH_VENC_SetRCAttr", true);
+    FH_SYM(dsp, "libdsp", p->fnVencStart, "FH_VENC_StartRecvPic", true);
+    FH_SYM(dsp, "libdsp", p->fnVencStop, "FH_VENC_StopRecvPic", true);
 
     FH_SYM(p->h_isp, "libisp", p->fnIspMemInit, "API_ISP_MemInit", true);
     FH_SYM(p->h_isp, "libisp", p->fnIspSensorRegCb, "API_ISP_SensorRegCb", true);
@@ -397,15 +408,49 @@ static void fh_pipe_probe(fh_state_t *st)
  * AFTER FH_SYS_Init: VPSS, sensor, ISP
  * ================================================================ */
 
-static int fh_vpss_open(fh_state_t *st, int chn, unsigned int w, unsigned int h, unsigned int fps)
+/*
+ * fh_vpss_configure -- divinus's f2_vpss_setup: (re)configure one VPSS output
+ * channel and leave it open.
+ *
+ * A channel's memory is sized once, at its first configuration; asking for
+ * a larger picture later needs a restart, so that is refused rather than
+ * attempted. Channel 0 is first configured by fh_pipe_start at the full
+ * sensor size, so the main stream can take any size up to it.
+ */
+int fh_vpss_configure(fh_state_t *st, int chn, unsigned int w, unsigned int h, unsigned int fps)
 {
     fh_pipe_impl *p = &st->pipe;
     fh_dim dim = {w, h};
     fh_vpss_framectrl fc;
     int rc;
 
-    if (p->fnVpssChnInitMem && (rc = p->fnVpssChnInitMem((unsigned)chn, w, h)))
-        HAL_LOG_WARN("vpss: FH_VPSS_ChnInitMem(%d, %ux%u) %d (0x%x)", chn, w, h, rc, (unsigned)rc);
+    if (chn < 0 || chn >= st->vpss_count)
+        return RSS_ERR_INVAL;
+    if (!fps)
+        fps = st->mode && st->mode->fps ? st->mode->fps : 25;
+
+    if (st->vpss_open[chn] && st->vpss_dim[chn].width == w && st->vpss_dim[chn].height == h)
+        return RSS_OK;
+
+    if (st->vpss_open[chn]) {
+        p->fnVpssCloseChn((unsigned)chn);
+        st->vpss_open[chn] = false;
+    }
+
+    if (st->vpss_made[chn].width) {
+        if (w > st->vpss_made[chn].width || h > st->vpss_made[chn].height) {
+            HAL_LOG_ERR("vpss: channel %d was sized %ux%u; %ux%u needs a restart", chn,
+                        st->vpss_made[chn].width, st->vpss_made[chn].height, w, h);
+            return RSS_ERR_INVAL;
+        }
+    } else if (p->fnVpssChnInitMem) {
+        rc = p->fnVpssChnInitMem((unsigned)chn, w, h);
+        if (rc)
+            HAL_LOG_WARN("vpss: FH_VPSS_ChnInitMem(%d, %ux%u) %d (0x%x)", chn, w, h, rc,
+                         (unsigned)rc);
+        else
+            st->vpss_made[chn] = dim;
+    }
 
     rc = p->fnVpssSetChnAttr((unsigned)chn, &dim);
     if (rc) {
@@ -413,9 +458,9 @@ static int fh_vpss_open(fh_state_t *st, int chn, unsigned int w, unsigned int h,
         return RSS_ERR_IO;
     }
 
-    /* divinus's values, as they are: {src = rate, dst = 1}. Phase 2b, with an
-     * encoder counting output frames, is where their meaning gets measured. */
-    fc.src_fps = (unsigned short)(fps ? fps : 25);
+    /* divinus's values, as they are: {src = rate, dst = 1}; it streams at
+     * the full rate with them. */
+    fc.src_fps = (unsigned short)fps;
     fc.dst_fps = 1;
     rc = p->fnVpssSetFramectrl((unsigned)chn, &fc);
     if (rc) {
@@ -430,6 +475,7 @@ static int fh_vpss_open(fh_state_t *st, int chn, unsigned int w, unsigned int h,
     }
     st->vpss_open[chn] = true;
     st->vpss_dim[chn] = dim;
+    HAL_LOG_INFO("vpss: channel %d open at %ux%u", chn, w, h);
     return RSS_OK;
 }
 
@@ -450,6 +496,9 @@ int fh_pipe_start(fh_state_t *st)
     int rc;
 
     rc = fh_pipe_open_libs(st);
+    if (rc)
+        return rc;
+    rc = fh_enc_init(st);
     if (rc)
         return rc;
 
@@ -479,7 +528,7 @@ int fh_pipe_start(fh_state_t *st)
 
     /* Channel 0 at the full sensor size, so its memory is sized for the
      * largest picture any later reconfiguration can ask of it. */
-    rc = fh_vpss_open(st, 0, vi.width, vi.height, st->mode->fps);
+    rc = fh_vpss_configure(st, 0, vi.width, vi.height, st->mode->fps);
     if (rc)
         return rc;
 
@@ -539,6 +588,9 @@ void fh_pipe_stop(fh_state_t *st)
     fh_pipe_impl *p = &st->pipe;
     int i;
 
+    /* Encoders first: an encoder still bound to a VPSS channel that is
+     * about to close is the state that leaves the driver holding buffers. */
+    fh_enc_teardown(st);
     fh_isp_thread_stop(st);
     if (st->isp_inited) {
         p->fnIspExit();
@@ -563,6 +615,7 @@ void fh_pipe_stop(fh_state_t *st)
         p->fnVpssDisable(0);
         st->vpss_enabled = false;
     }
+    memset(st->vpss_made, 0, sizeof(st->vpss_made));
     fh_pipe_close_libs(p);
 }
 
