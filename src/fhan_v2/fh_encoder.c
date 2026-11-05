@@ -678,25 +678,45 @@ static unsigned int fh_rate_word(uint32_t bitrate_bps)
     return kbps << 10;
 }
 
+/*
+ * fh_fill_rc -- FH_VENC_SetRCAttr's input, as libdsp actually reads it.
+ *
+ * Read off libdsp.so's _VENC_SetRCAttr (bench copy, 2026-11-05): a switch
+ * on the mode word that copies selected input words into a 26-word kernel
+ * block (ioctl 0xc06c540c) and fills the rest with constants. For the
+ * modes used here the input words mean:
+ *
+ *   mode 4  H.264 CBR   p0 init QP   p1 bitrate   p2 frame rate
+ *                       p3..p5 -> k17,k20,k21    p6..p8 -> k14,k15,k16
+ *                       (QP limits are fixed by the library: 10..50)
+ *   mode 8  H.265 CBR   p1 bitrate   p2 frame rate
+ *                       p4,p5 -> k20,k21        p6,p7 -> k14,k15
+ *                       (k5 = 10, k16 = 50, k17 = 10 fixed)
+ *   mode 3  H.264 VBR   p0 init QP   p1 bitrate   p2 min QP  p3 max QP
+ *   mode 7  H.265 VBR   p4 min I-QP  p5 max I-QP  p6 frame rate
+ *                       p7..p9 -> k17,k20,k21   p10..p12 -> k14,k15,k16
+ *
+ * divinus's layout put the frame rate where VBR expects its minimum QP
+ * (so the driver rejected VBR outright: 0x81024003) and, for CBR, put the
+ * frame rate (25 | 1 << 16 = 65561) and 120 into k14/k15 -- which the
+ * vendor's own bitrate-only mode (9) sets to 5 and 1, i.e. a statistics
+ * window of 5 s and its flag. With a window of 65561 the loop never
+ * converged: bench CBR held ~190 kbit/s whatever the target or QP bounds.
+ *
+ * So the tail words take mode 9's constants: k14 = 5, k15 = 1, k16 = 50,
+ * k17 = 10 (mode 8's fixed values), k20 = 0, k21 = -2. The bitrate is in
+ * bits/s (kbps is refused as out of range); FH_RC_UNITS still overrides.
+ */
 static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
 {
     bool h265 = enc->codec == RSS_CODEC_H265;
     unsigned int fps = enc->fps_den ? enc->fps_num / enc->fps_den : 25;
     unsigned int frw = (fps ? fps : 25) | (1u << 16);
     unsigned int kbps = enc->bitrate ? enc->bitrate / 1000u : 1024u;
+    unsigned int rate = fh_rate_word(enc->bitrate);
+    unsigned int init_qp = (enc->init_qp >= 0 && enc->init_qp <= 51) ? (unsigned)enc->init_qp : 35u;
 
     memset(rc, 0, sizeof(*rc));
-
-    if (enc->rc_mode == RSS_RC_VBR) {
-        rc->mode = h265 ? FH_RC_H265VBR : FH_RC_H264VBR;
-        rc->param[0] = 35;
-        rc->param[1] = fh_rate_word(enc->bitrate);
-        rc->param[2] = frw;
-        rc->param[3] = 51;
-        rc->param[6] = 5;
-        rc->param[7] = 1;
-        return;
-    }
 
     if (enc->rc_mode == RSS_RC_FIXQP) {
         unsigned int qp = enc->init_qp >= 0 ? (unsigned int)enc->init_qp
@@ -714,53 +734,45 @@ static void fh_fill_rc(fh_enc_chn_t *enc, fh_venc_rc *rc, int chn)
         }
     }
 
-    /*
-     * CBR, for both codecs, with the vendor's own CBR layout (divinus
-     * f2_venc.h). Not the fixed-QP stand-in divinus 2c0a8bc uses for H.264:
-     * bench, 2026-11-05, with the lens covered under the night tuning, a
-     * fixed QP 35 turned sensor noise into 1.75 MB frames -- ~350 Mbit/s,
-     * more than half the encoder's stream buffer per frame. A bitrate cap
-     * the encoder actually enforces is the only thing that stops that;
-     * whether the V200's H.264 loop enforces it is what the per-channel
-     * bitrate log measures.
-     */
-    rc->mode = h265 ? FH_RC_H265CBR : FH_RC_H264CBR;
-    HAL_LOG_INFO("venc chn %d: %s CBR %u kbps", chn, h265 ? "H.265" : "H.264", kbps);
-    /*
-     * QP bounds. divinus's values were init 35, max 50 (words 3 and 5),
-     * min 35 (word 4). Bench, 2026-11-05: CBR held ~190 kbit/s against a
-     * 4000 target on a static lit scene with the bitrate word in either
-     * kbps<<10 or plain bps (identical results; plain kbps is rejected as
-     * out of range) -- the encoder sitting on its QP floor of 35, unable
-     * to spend the budget, and the picture blocky. FH_RC_QP=init,min,max
-     * in rvd's environment overrides all three for the bench.
-     */
-    {
-        unsigned int qinit = 35, qmin = 35, qmax = 50;
-        const char *q = getenv("FH_RC_QP");
+    if (enc->rc_mode == RSS_RC_VBR) {
+        unsigned int qmin = enc->min_qp > 0 ? (unsigned)enc->min_qp : 20u;
+        unsigned int qmax = enc->max_qp > 0 && enc->max_qp <= 51 ? (unsigned)enc->max_qp : 48u;
 
-        if (q) {
-            unsigned int a, b, c;
-
-            if (sscanf(q, "%u,%u,%u", &a, &b, &c) == 3 && b <= a && a <= c && c <= 51) {
-                qinit = a;
-                qmin = b;
-                qmax = c;
-            } else {
-                HAL_LOG_WARN("FH_RC_QP='%s' is not init,min,max with min<=init<=max<=51", q);
-            }
-        }
-        rc->param[0] = qinit;
+        if (init_qp < qmin)
+            init_qp = qmin;
+        if (init_qp > qmax)
+            init_qp = qmax;
+        rc->mode = h265 ? FH_RC_H265VBR : FH_RC_H264VBR;
+        rc->param[0] = init_qp;
+        rc->param[1] = rate;
+        rc->param[2] = qmin;
         rc->param[3] = qmax;
         rc->param[4] = qmin;
         rc->param[5] = qmax;
+        rc->param[6] = frw;
+        rc->param[7] = 10;          /* k17 */
+        rc->param[8] = 0;           /* k20 */
+        rc->param[9] = 0xFFFFFFFEu; /* k21 = -2 */
+        rc->param[10] = 5;          /* k14: statistics window, s */
+        rc->param[11] = 1;          /* k15 */
+        rc->param[12] = 50;         /* k16 */
+        HAL_LOG_INFO("venc chn %d: %s VBR %u kbps, QP %u..%u", chn, h265 ? "H.265" : "H.264", kbps,
+                     qmin, qmax);
+        return;
     }
-    rc->param[1] = fh_rate_word(enc->bitrate);
+
+    /* CBR, and every other mode raptor has (smart, capped_*) */
+    rc->mode = h265 ? FH_RC_H265CBR : FH_RC_H264CBR;
+    rc->param[0] = init_qp;     /* H.265 ignores it */
+    rc->param[1] = rate;
     rc->param[2] = frw;
-    rc->param[6] = frw;
-    rc->param[7] = 120;
-    rc->param[10] = 5;
-    rc->param[11] = 1;
+    rc->param[3] = 10;          /* k17 (H.264; H.265 fixes it at 10) */
+    rc->param[4] = 0;           /* k20 */
+    rc->param[5] = 0xFFFFFFFEu; /* k21 = -2 */
+    rc->param[6] = 5;           /* k14: statistics window, s */
+    rc->param[7] = 1;           /* k15 */
+    rc->param[8] = 50;          /* k16 (H.264; H.265 fixes it at 50) */
+    HAL_LOG_INFO("venc chn %d: %s CBR %u kbps", chn, h265 ? "H.265" : "H.264", kbps);
 }
 
 static unsigned int fh_h264_profile(int profile)
@@ -922,6 +934,8 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
     enc->bitrate = cfg->bitrate;
     enc->rc_mode = cfg->rc_mode;
     enc->init_qp = cfg->init_qp;
+    enc->min_qp = cfg->min_qp;
+    enc->max_qp = cfg->max_qp;
     enc->profile = cfg->profile;
     enc->jpeg_quality = cfg->init_qp > 0 ? cfg->init_qp : 0;
 
@@ -941,33 +955,6 @@ int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg)
             return RSS_ERR_IO;
         }
         enc->made = true;
-
-        /*
-         * Diagnostic: the driver's own defaults for a fresh channel, before
-         * this backend writes anything. H.264 and H.265 CBR ignore both the
-         * bitrate and the QP bounds as divinus lays them out (bench,
-         * 2026-11-05), and VBR's layout is rejected outright, so the
-         * vendor's defaults are the best evidence of the real layout.
-         */
-        {
-            unsigned int *d = (unsigned int *)calloc(512, sizeof(unsigned int));
-
-            if (d) {
-                if (st->pipe.fnVencGetAttr && !st->pipe.fnVencGetAttr((unsigned)chn, d))
-                    HAL_LOG_INFO("venc chn %d: default attr: %u %u %u %u %u | %u %u %u %u %u %u "
-                                 "%u %u | rc %u: %u %u %u %u %u %u %u %u %u %u %u %u",
-                                 chn, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
-                                 d[10], d[11], d[12], d[21], d[22], d[23], d[24], d[25], d[26],
-                                 d[27], d[28], d[29], d[30], d[31], d[32], d[33]);
-                memset(d, 0, 512 * sizeof(unsigned int));
-                if (st->pipe.fnVencGetRc && !st->pipe.fnVencGetRc((unsigned)chn, d))
-                    HAL_LOG_INFO("venc chn %d: default RC: %u | %u %u %u %u %u %u %u %u %u %u %u "
-                                 "%u %u %u %u %u",
-                                 chn, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9],
-                                 d[10], d[11], d[12], d[13], d[14], d[15], d[16]);
-                free(d);
-            }
-        }
         enc->made_w = enc->width;
         enc->made_h = enc->height;
     } else if (enc->width > enc->made_w || enc->height > enc->made_h) {

@@ -42,7 +42,7 @@ typedef struct {
     unsigned int width, height, made_w, made_h;
     uint32_t fps_num, fps_den, gop, bitrate;
     rss_rc_mode_t rc_mode;
-    int init_qp, jpeg_quality, profile;
+    int init_qp, jpeg_quality, profile, min_qp, max_qp;
     int bound_fs;
 
     /* slots[] hold frames; q[] is the FIFO of slot indexes; held is the
