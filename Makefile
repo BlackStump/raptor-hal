@@ -22,6 +22,7 @@
 -include mk/sigmastar.mk
 -include mk/hisilicon.mk
 -include mk/fullhan.mk
+-include mk/xiongmai.mk
 
 ifeq ($(filter clean,$(MAKECMDGOALS)),)
 ifndef PLATFORM
@@ -30,7 +31,7 @@ endif
 
 # Validate platform
 VALID_PLATFORMS := T10 T20 T21 T23 T30 T31 T32 T33 T40 T41 $(SIGMASTAR_PLATFORMS) \
-                   $(HISILICON_PLATFORMS) $(FULLHAN_PLATFORMS)
+                   $(HISILICON_PLATFORMS) $(FULLHAN_PLATFORMS) $(XIONGMAI_PLATFORMS)
 ifeq ($(filter $(PLATFORM),$(VALID_PLATFORMS)),)
 $(error Invalid PLATFORM=$(PLATFORM). Valid: $(VALID_PLATFORMS))
 endif
@@ -97,7 +98,7 @@ endif
 # swallow the next argument.
 ifneq ($(SDK_INCLUDE),)
 CFLAGS  += -I$(SDK_INCLUDE)
-ifeq ($(filter $(VENDOR),sigmastar hisilicon fullhan),)  # IMP headers sit in an imp/ subdir; vendor headers are flat
+ifeq ($(filter $(VENDOR),sigmastar hisilicon fullhan xiongmai),)  # IMP headers sit in an imp/ subdir; vendor headers are flat
 CFLAGS  += -I$(SDK_INCLUDE)/imp
 endif
 endif
@@ -125,7 +126,7 @@ endif
 CORE_SRCS := src/hal_caps.c
 
 # VIDEO_SRCS/AUDIO_SRCS/HAL_COMMON_SRC may already be set by a vendor fragment.
-ifeq ($(filter $(VENDOR),sigmastar hisilicon fullhan),)
+ifeq ($(filter $(VENDOR),sigmastar hisilicon fullhan xiongmai),)
 VIDEO_SRCS := src/hal_encoder.c \
               src/hal_framesource.c \
               src/hal_isp.c \

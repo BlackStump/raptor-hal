@@ -54,6 +54,6 @@ const rss_hal_caps_t g_hal_caps = {
 };
 
 #else
-#error                                                                                             \
-    "No PLATFORM_* defined. Set one of: PLATFORM_T10 T20 T21 T23 T30 T31 T32 T33 T40 T41 A1 INFINITY6E INFINITY6B0 INFINITY6C HI3516EV200 HI3516EV300 HI3516CV610 FH8852V200"
+/* Xiongmai, which owns the unknown-platform #error from here on. */
+#include "caps_xiongmai.inc"
 #endif

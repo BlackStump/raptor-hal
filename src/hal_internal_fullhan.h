@@ -23,5 +23,7 @@
 #define HAL_FULLHAN_SDK
 #define HAL_FH_V2
 #else
-#error "No PLATFORM_* defined"
+/* Xiongmai, and the unknown-platform #error from here on; chained the same
+ * way this file is chained off the HiSilicon one. */
+#include "hal_internal_xiongmai.h"
 #endif
