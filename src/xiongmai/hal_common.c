@@ -1,12 +1,12 @@
 /*
  * xiongmai/hal_common.c -- Raptor HAL common layer, Xiongmai XM530 family
  *
- * Phase 2a: sensor, ISP and the VI framesources (xm_pipeline.c, xm_isp.c).
+ * Phase 2b: sensor, ISP and the VI framesources (xm_pipeline.c, xm_isp.c),
+ * encoders (xm_encoder.c).
  * Shaped like src/fhan_v2/hal_common.c: the vtable publishes only the ops
  * that exist,
- * RSS_HAL_CALL() answers RSS_ERR_NOTSUP for the rest. A Phase 2a rvd brings
- * the sensor and ISP up, creates its framesources and stops at the first
- * encoder, which is Phase 2b.
+ * RSS_HAL_CALL() answers RSS_ERR_NOTSUP for the rest. Phase 2b: sensor,
+ * ISP, framesources and encoders (xm_encoder.c, libxmvenc) -- rvd streams.
  *
  * What it does not need, unlike Fullhan: a uClibc bridge or any dlopen. rvd
  * links openxiongmai's libxmhost.so (the MPI built in), libispapp_XM530.so,
@@ -260,8 +260,8 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
     ret = xm_pipe_start(st);
     if (ret)
         goto err_free;
-    HAL_LOG_INFO("hal_init: sensor and ISP up; framesources are VI 0 and extended 1; "
-                 "the encoder is Phase 2b");
+    HAL_LOG_INFO("hal_init: sensor and ISP up; framesources are VI 0 and extended 1, "
+                 "encoders libxmvenc");
 #else
     ret = XM_MPI_SYS_Init();
     if (ret) {
@@ -359,6 +359,29 @@ static const rss_hal_ops_t g_ops = {
     .fs_set_frame_depth = hal_fs_set_frame_depth,
     .fs_get_frame = hal_fs_get_frame,
     .fs_release_frame = hal_fs_release_frame,
+
+    .bind = hal_bind,
+    .unbind = hal_unbind,
+
+    .enc_create_group = hal_enc_create_group,
+    .enc_destroy_group = hal_enc_destroy_group,
+    .enc_create_channel = hal_enc_create_channel,
+    .enc_destroy_channel = hal_enc_destroy_channel,
+    .enc_register_channel = hal_enc_register_channel,
+    .enc_unregister_channel = hal_enc_unregister_channel,
+    .enc_start = hal_enc_start,
+    .enc_stop = hal_enc_stop,
+    .enc_poll = hal_enc_poll,
+    .enc_get_frame = hal_enc_get_frame,
+    .enc_release_frame = hal_enc_release_frame,
+    .enc_request_idr = hal_enc_request_idr,
+    .enc_set_rc_mode = hal_enc_set_rc_mode,
+    .enc_set_bitrate = hal_enc_set_bitrate,
+    .enc_set_gop = hal_enc_set_gop,
+    .enc_set_jpeg_qp = hal_enc_set_jpeg_qp,
+    .enc_get_jpeg_qp = hal_enc_get_jpeg_qp,
+    .enc_get_fps = hal_enc_get_fps,
+    .enc_get_avg_bitrate = hal_enc_get_avg_bitrate,
 
     .isp_get_sensor_attr = hal_isp_get_sensor_attr,
     .isp_get_sensor_fps = hal_isp_get_sensor_fps,

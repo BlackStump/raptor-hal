@@ -46,11 +46,16 @@ HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
 # hal_common.c is HAL_COMMON_SRC (compiled into both archives); hal_gpio.c
 # is vendor-neutral sysfs. Phase 2a adds xm_pipeline.c (xmhost_start,
 # ispApp, the VI framesources) and xm_isp.c (exposure and saturation
-# attributes). Each later phase adds the files it writes, and only files
-# that exist.
+# attributes); Phase 2b xm_encoder.c. Each later phase adds the files it
+# writes, and only files that exist.
 VIDEO_SRCS := $(BACKEND_DIR)/xm_pipeline.c \
               $(BACKEND_DIR)/xm_isp.c \
+              $(BACKEND_DIR)/xm_encoder.c \
               src/hal_gpio.c
+
+# Phase 2b: xm_encoder.c on libxmvenc (static, MIT); raptor's Makefile links
+# the archive.
+$(BACKEND_DIR)/xm_encoder.o: CFLAGS += -I$(XM_SDK)/libxmvenc
 
 # xm_isp.c alone speaks the ISP library's headers (isp/include/isp), which
 # carry their own XM_* types; they stay out of every other object.

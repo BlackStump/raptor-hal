@@ -9,6 +9,7 @@
 
 #include "xm_common.h"
 
+#include <pthread.h>
 #include <stdint.h>
 
 /* fs channel 0 is VI channel 0 (no scaler); fs channel 1 is VI extended
@@ -23,6 +24,58 @@ typedef struct {
     uint32_t cap_x, cap_y;  /* where that window starts in the sensor frame */
     uint32_t fps;
 } xm_sensor_mode_t;
+
+/* Encoder channels: rvd's main and sub H.264 (0, 1) and their JPEG
+ * snapshots (2, 3), one libxmvenc channel id each (0-3). */
+#define XM_ENC_CHN_MAX 4
+#define XM_ENC_QDEPTH 4
+#define XM_ENC_MAX_NALS 8
+
+typedef struct {
+    uint8_t *buf;
+    size_t len, cap;
+    rss_nal_unit_t nals[XM_ENC_MAX_NALS];
+    uint32_t nal_count;
+    int64_t ts;
+    uint32_t seq;
+    bool key;
+} xm_frame_t;
+
+typedef struct {
+    bool created, started;
+    rss_codec_t codec; /* H264, or JPEG for JPEG and MJPEG */
+    uint32_t width, height, fps_num, fps_den, gop, bitrate;
+    rss_rc_mode_t rc_mode;
+    int profile, init_qp, min_qp, max_qp, quality;
+    int vi;      /* the VI channel (fs) it encodes, -1: none yet */
+    void *xchn;  /* struct xmvenc_chn */
+    bool want_idr;
+    int64_t next_due; /* pacing below the sensor rate (JPEG at 1 fps) */
+
+    /* queue of encoded frames for rvd: slots[] hold them, q[] the order */
+    xm_frame_t slots[XM_ENC_QDEPTH + 1];
+    int q[XM_ENC_QDEPTH];
+    int q_head, q_count, held;
+    uint32_t seq, drops;
+
+    /* 10 s statistics */
+    uint32_t st_frames, st_fail;
+    uint64_t st_bytes, st_hw_us;
+    int st_qp;
+    int64_t st_since;
+    bool first_logged;
+} xm_enc_chn_t;
+
+/* One feeder per VI channel: it takes each frame once and hands it to every
+ * started encoder channel bound to that VI channel (H.264 and its JPEG), so
+ * nothing else competes for VI's buffers. rvd's raw grabs from a fed VI
+ * channel are served by the feeder too, as copies. */
+typedef struct {
+    pthread_t thread;
+    bool running, stop;
+    pthread_mutex_t lock; /* held over one frame: encodes, grab, release */
+    bool grab_req, grab_done;
+} xm_feeder_t;
 
 typedef struct {
     bool created;
@@ -42,6 +95,21 @@ typedef struct {
 
     const xm_sensor_mode_t *mode;
     xm_fs_chn_t fs[XM_FS_CHN_MAX];
+    /* what VI was last given, so an unchanged channel 0 is not set again
+     * (setting it costs about 3 s) */
+    struct {
+        bool valid;
+        uint32_t w, h, x, y;
+    } fs_applied[XM_FS_CHN_MAX];
+
+    /* encoders (xm_encoder.c) */
+    void *venc; /* struct xmvenc */
+    bool enc_ready;
+    pthread_mutex_t enc_lock; /* queues and channel state */
+    pthread_cond_t enc_cond;
+    xm_enc_chn_t enc[XM_ENC_CHN_MAX];
+    xm_feeder_t feed[XM_FS_CHN_MAX];
+    int osd_src_fs[XM_ENC_CHN_MAX];
 
     /* frame grabs: the held VI frame and its /dev/mem mapping per channel */
     int mem_fd;
@@ -52,6 +120,8 @@ typedef struct {
         size_t map_len;
         uint8_t *copy;
         size_t copy_cap;
+        bool from_feeder;       /* the copy came from the feeder, no VI frame held */
+        rss_frame_info_t info;  /* the feeder's copy */
     } grab[XM_FS_CHN_MAX];
 } xm_state_t;
 
@@ -76,6 +146,36 @@ int hal_fs_set_frame_depth(void *ctx, int chn, int depth);
 int hal_fs_set_fifo(void *ctx, int chn, int depth);
 int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *info);
 int hal_fs_release_frame(void *ctx, int chn, void *frame_data);
+
+/* used by the feeder (xm_encoder.c): copy the VI frame vf of channel chn
+ * into grab[chn].copy as contiguous NV12, filling grab[chn].info */
+int xm_frame_copy(xm_state_t *st, int chn, const void *vf);
+
+/* xm_encoder.c */
+int xm_enc_init(xm_state_t *st);
+void xm_enc_deinit(xm_state_t *st);
+int xm_enc_grab(xm_state_t *st, int chn); /* a raw frame from a fed channel */
+int hal_enc_create_group(void *ctx, int grp);
+int hal_enc_destroy_group(void *ctx, int grp);
+int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);
+int hal_enc_destroy_channel(void *ctx, int chn);
+int hal_enc_register_channel(void *ctx, int grp, int chn);
+int hal_enc_unregister_channel(void *ctx, int chn);
+int hal_bind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+int hal_unbind(void *ctx, const rss_cell_t *src, const rss_cell_t *dst);
+int hal_enc_start(void *ctx, int chn);
+int hal_enc_stop(void *ctx, int chn);
+int hal_enc_poll(void *ctx, int chn, uint32_t timeout_ms);
+int hal_enc_get_frame(void *ctx, int chn, rss_frame_t *frame);
+int hal_enc_release_frame(void *ctx, int chn, rss_frame_t *frame);
+int hal_enc_request_idr(void *ctx, int chn);
+int hal_enc_set_rc_mode(void *ctx, int chn, rss_rc_mode_t mode, uint32_t bitrate);
+int hal_enc_set_bitrate(void *ctx, int chn, uint32_t bitrate);
+int hal_enc_set_gop(void *ctx, int chn, uint32_t gop_length);
+int hal_enc_set_jpeg_qp(void *ctx, int chn, int qp);
+int hal_enc_get_jpeg_qp(void *ctx, int chn, int *qp);
+int hal_enc_get_fps(void *ctx, int chn, uint32_t *fps_num, uint32_t *fps_den);
+int hal_enc_get_avg_bitrate(void *ctx, int chn, uint32_t *bitrate);
 
 /* xm_isp.c -- the ISP library's attributes, kept out of the MPI headers'
  * translation unit (the two header sets are not meant to meet). */

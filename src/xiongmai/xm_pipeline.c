@@ -106,6 +106,8 @@ int xm_pipe_start(xm_state_t *st)
 
     st->mem_fd = -1;
     st->mode = xm_find_mode(st->sensor_name);
+    memset(st->fs_applied, 0, sizeof(st->fs_applied));
+    xm_enc_init(st);
 
     if (!ae || strcmp(ae, "1") || !awb || strcmp(awb, "1"))
         HAL_LOG_WARN("isp: LIBISP_OPEN_AE=%s LIBISP_OPEN_AWB=%s; without both at 1 nothing runs "
@@ -143,6 +145,7 @@ void xm_pipe_stop(xm_state_t *st)
 
     if (!st)
         return;
+    xm_enc_deinit(st); /* feeders first: they hold VI frames */
     for (chn = XM_FS_CHN_MAX - 1; chn >= 0; chn--) {
         xm_grab_drop(st, chn);
         if (st->fs[chn].enabled)
@@ -212,6 +215,14 @@ static int xm_fs_set(xm_state_t *st, int chn)
 {
     xm_fs_chn_t *f = &st->fs[chn];
 
+    /* VI takes about 3 s over a channel 0 attribute set, even the same
+     * one again (rvd's own create after the self-test, a restarted
+     * stream): set only what changed */
+    if (st->fs_applied[chn].valid && st->fs_applied[chn].w == f->width &&
+        st->fs_applied[chn].h == f->height && st->fs_applied[chn].x == f->cap_x &&
+        st->fs_applied[chn].y == f->cap_y)
+        return RSS_OK;
+
     if (chn == 0) {
         VI_CHN_ATTR_S vi;
 
@@ -244,6 +255,11 @@ static int xm_fs_set(xm_state_t *st, int chn)
             return RSS_ERR_IO;
         }
     }
+    st->fs_applied[chn].valid = true;
+    st->fs_applied[chn].w = f->width;
+    st->fs_applied[chn].h = f->height;
+    st->fs_applied[chn].x = f->cap_x;
+    st->fs_applied[chn].y = f->cap_y;
     return RSS_OK;
 }
 
@@ -385,7 +401,12 @@ int hal_fs_disable_channel(void *ctx, int chn)
         if (!st->fs[c].enabled || (c != chn && chn != 0))
             continue;
         xm_grab_drop(st, c);
+        /* not under a frame the feeder holds */
+        if (st->enc_ready)
+            pthread_mutex_lock(&st->feed[c].lock);
         XM_MPI_VI_DisableChn(c);
+        if (st->enc_ready)
+            pthread_mutex_unlock(&st->feed[c].lock);
         st->fs[c].enabled = false;
     }
     return RSS_OK;
@@ -410,6 +431,10 @@ int hal_fs_set_fifo(void *ctx, int chn, int depth)
 
 static void xm_grab_drop(xm_state_t *st, int chn)
 {
+    if (st->grab[chn].from_feeder) {
+        st->grab[chn].from_feeder = false; /* a copy; no VI frame behind it */
+        return;
+    }
     if (!st->grab[chn].held)
         return;
     if (st->grab[chn].map)
@@ -420,28 +445,135 @@ static void xm_grab_drop(xm_state_t *st, int chn)
     st->grab[chn].held = false;
 }
 
+static int xm_mem_open(xm_state_t *st)
+{
+    if (st->mem_fd >= 0)
+        return RSS_OK;
+    st->mem_fd = open("/dev/mem", O_RDONLY | O_SYNC | O_CLOEXEC);
+    if (st->mem_fd < 0) {
+        HAL_LOG_ERR("fs: /dev/mem: %s", strerror(errno));
+        return RSS_ERR_IO;
+    }
+    return RSS_OK;
+}
+
 /*
- * One frame of channel chn as contiguous NV12. The luma and chroma planes
- * are mapped from their physical addresses; when chroma follows luma
- * directly (as on M1) the caller gets the mapping itself, otherwise the
- * two planes are copied together. VI_GetFrame does not wait: no frame yet
+ * Map a VI frame's planes: one mapping over both, which VI puts close
+ * together, returned in map and map_len; y and c point at the planes in
+ * it. The caller unmaps.
+ */
+static int xm_frame_map(xm_state_t *st, int chn, const VIDEO_FRAME_INFO_S *vf, uint8_t **map,
+                        size_t *map_len, const uint8_t **y, const uint8_t **c)
+{
+    XM_U32 w = vf->stVFrame.u32Width, h = vf->stVFrame.u32Height;
+    XM_U32 yphys = vf->stVFrame.u32PhyAddr[0], cphys = vf->stVFrame.u32PhyAddr[1], base;
+    size_t ysize = (size_t)w * h, span;
+    long page = sysconf(_SC_PAGESIZE);
+    uint8_t *m;
+
+    if (xm_mem_open(st))
+        return RSS_ERR_IO;
+    if (!yphys || !cphys || cphys < yphys || cphys - yphys > ysize + (XM_U32)page) {
+        HAL_LOG_WARN("fs %d: chroma %08x is not near luma %08x; not mapped", chn, cphys, yphys);
+        return RSS_ERR_IO;
+    }
+    base = yphys & ~(XM_U32)(page - 1);
+    span = (size_t)(cphys - base) + ysize / 2;
+    m = mmap(NULL, span, PROT_READ, MAP_SHARED, st->mem_fd, (off_t)base);
+    if (m == MAP_FAILED) {
+        HAL_LOG_ERR("fs %d: mmap %08x+%zu: %s", chn, base, span, strerror(errno));
+        return RSS_ERR_IO;
+    }
+    *map = m;
+    *map_len = span;
+    *y = m + (yphys - base);
+    *c = m + (cphys - base);
+    return RSS_OK;
+}
+
+static int xm_copy_room(xm_state_t *st, int chn, size_t need)
+{
+    uint8_t *b;
+
+    if (st->grab[chn].copy_cap >= need)
+        return RSS_OK;
+    b = realloc(st->grab[chn].copy, need);
+    if (!b)
+        return RSS_ERR_NOMEM;
+    st->grab[chn].copy = b;
+    st->grab[chn].copy_cap = need;
+    return RSS_OK;
+}
+
+static void xm_fill_info(rss_frame_info_t *info, const VIDEO_FRAME_INFO_S *vf, void *data)
+{
+    size_t ysize = (size_t)vf->stVFrame.u32Width * vf->stVFrame.u32Height;
+
+    memset(info, 0, sizeof(*info));
+    info->width = (uint16_t)vf->stVFrame.u32Width;
+    info->height = (uint16_t)vf->stVFrame.u32Height;
+    info->pixfmt = RSS_PIXFMT_NV12;
+    info->timestamp = xm_now_us();
+    info->phys_addr = vf->stVFrame.u32PhyAddr[0];
+    info->virt_addr = data;
+    info->size = (uint32_t)(ysize + ysize / 2);
+}
+
+/* The feeder's half of a raw grab on a fed channel (xm_enc_grab): copy
+ * the frame it holds into grab[chn].copy. */
+int xm_frame_copy(xm_state_t *st, int chn, const void *vfp)
+{
+    const VIDEO_FRAME_INFO_S *vf = vfp;
+    size_t ysize = (size_t)vf->stVFrame.u32Width * vf->stVFrame.u32Height, map_len;
+    const uint8_t *y, *c;
+    uint8_t *map;
+    int rc;
+
+    if ((rc = xm_copy_room(st, chn, ysize + ysize / 2)) ||
+        (rc = xm_frame_map(st, chn, vf, &map, &map_len, &y, &c)))
+        return rc;
+    memcpy(st->grab[chn].copy, y, ysize);
+    memcpy(st->grab[chn].copy + ysize, c, ysize / 2);
+    munmap(map, map_len);
+    xm_fill_info(&st->grab[chn].info, vf, st->grab[chn].copy);
+    return RSS_OK;
+}
+
+/*
+ * One frame of channel chn as contiguous NV12.
+ *
+ * On a channel the encoders are fed from, the feeder takes the frame (VI
+ * gives each frame to one getter, and the encoders must not lose any):
+ * it copies its next one for us. Otherwise the planes are mapped straight
+ * from VI's buffer, and when chroma follows luma directly (as on M1) the
+ * caller gets the mapping itself. VI_GetFrame does not wait: no frame yet
  * is RSS_ERR_BUSY after a short poll.
  */
 int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *info)
 {
     xm_state_t *st = xm_state(ctx);
     VIDEO_FRAME_INFO_S *vf;
-    XM_U32 w, h, yphys, cphys, base, off;
-    size_t ysize, csize, span;
-    long page;
-    uint8_t *m;
-    int tries;
+    XM_U32 w, h, yphys, cphys;
+    size_t ysize, csize, map_len;
+    const uint8_t *y, *c;
+    uint8_t *map;
+    int tries, rc;
 
     if (!st || !frame_data || !info || chn < 0 || chn >= XM_FS_CHN_MAX)
         return RSS_ERR_INVAL;
     if (!st->fs[chn].enabled)
         return RSS_ERR_INVAL;
     xm_grab_drop(st, chn); /* a caller that forgot to release */
+
+    if (st->enc_ready && st->feed[chn].running) {
+        rc = xm_enc_grab(st, chn);
+        if (rc)
+            return rc;
+        st->grab[chn].from_feeder = true;
+        *frame_data = st->grab[chn].copy;
+        *info = st->grab[chn].info;
+        return RSS_OK;
+    }
 
     vf = (VIDEO_FRAME_INFO_S *)st->grab[chn].frame;
     for (tries = 0;; tries++) {
@@ -468,52 +600,22 @@ int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *in
         xm_grab_drop(st, chn);
         return RSS_ERR_IO;
     }
-
-    if (st->mem_fd < 0) {
-        st->mem_fd = open("/dev/mem", O_RDONLY | O_SYNC | O_CLOEXEC);
-        if (st->mem_fd < 0) {
-            HAL_LOG_ERR("fs: /dev/mem: %s", strerror(errno));
-            xm_grab_drop(st, chn);
-            return RSS_ERR_IO;
-        }
-    }
-
-    /* one mapping over both planes when they are close; else luma to
-     * chroma's end anyway is wasteful, so map each and copy */
-    page = sysconf(_SC_PAGESIZE);
-    if (cphys >= yphys && cphys - yphys <= ysize + (XM_U32)page) {
-        base = yphys & ~(XM_U32)(page - 1);
-        off = yphys - base;
-        span = (size_t)(cphys - base) + csize;
-        m = mmap(NULL, span, PROT_READ, MAP_SHARED, st->mem_fd, (off_t)base);
-        if (m == MAP_FAILED) {
-            HAL_LOG_ERR("fs %d: mmap %08x+%zu: %s", chn, base, span, strerror(errno));
-            xm_grab_drop(st, chn);
-            return RSS_ERR_IO;
-        }
-        st->grab[chn].map = m;
-        st->grab[chn].map_len = span;
-        if (cphys == yphys + ysize) {
-            *frame_data = m + off;
-        } else {
-            if (st->grab[chn].copy_cap < ysize + csize) {
-                uint8_t *b = realloc(st->grab[chn].copy, ysize + csize);
-
-                if (!b) {
-                    xm_grab_drop(st, chn);
-                    return RSS_ERR_NOMEM;
-                }
-                st->grab[chn].copy = b;
-                st->grab[chn].copy_cap = ysize + csize;
-            }
-            memcpy(st->grab[chn].copy, m + off, ysize);
-            memcpy(st->grab[chn].copy + ysize, m + (cphys - base), csize);
-            *frame_data = st->grab[chn].copy;
-        }
-    } else {
-        HAL_LOG_WARN("fs %d: chroma %08x is far from luma %08x; not mapped", chn, cphys, yphys);
+    if ((rc = xm_frame_map(st, chn, vf, &map, &map_len, &y, &c))) {
         xm_grab_drop(st, chn);
-        return RSS_ERR_IO;
+        return rc;
+    }
+    st->grab[chn].map = map;
+    st->grab[chn].map_len = map_len;
+    if (c == y + ysize) {
+        *frame_data = (void *)y;
+    } else {
+        if ((rc = xm_copy_room(st, chn, ysize + csize))) {
+            xm_grab_drop(st, chn);
+            return rc;
+        }
+        memcpy(st->grab[chn].copy, y, ysize);
+        memcpy(st->grab[chn].copy + ysize, c, csize);
+        *frame_data = st->grab[chn].copy;
     }
 
     if (!st->fs[chn].logged) {
@@ -522,15 +624,7 @@ int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *in
                      yphys, cphys, cphys == yphys + ysize ? "contiguous" : "apart, copied",
                      (unsigned long long)vf->stVFrame.u64pts);
     }
-
-    memset(info, 0, sizeof(*info));
-    info->width = (uint16_t)w;
-    info->height = (uint16_t)h;
-    info->pixfmt = RSS_PIXFMT_NV12;
-    info->timestamp = xm_now_us();
-    info->phys_addr = yphys;
-    info->virt_addr = *frame_data;
-    info->size = (uint32_t)(ysize + csize);
+    xm_fill_info(info, vf, *frame_data);
     return RSS_OK;
 }
 

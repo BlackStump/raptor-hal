@@ -1,14 +1,16 @@
 /*
- * caps_xiongmai.inc -- capability tables for the Xiongmai backend.
+ * caps_xiongmai.inc -- capabilities of the Xiongmai XM530/XM550 backend.
  *
- * Included from the #else arm of caps_fullhan.inc's platform chain, and so
- * owns the unknown-platform #error. Fork-local; see FORK.md.
- *
- * Phase 2a: two framesources (VI channel 0 at the sensor window, and
- * extended channel 1, scaled), no encoder yet, so rvd stops at its first
- * encoder. The hardware ceilings, from openxiongmai's re_defines.h:
+ * Phase 2b: two framesources (VI channel 0 at the sensor window, and
+ * extended channel 1, scaled) and four encoder channels on openxiongmai's
+ * libxmvenc (the Hantro H1): H.264 main and sub, and a JPEG channel beside
+ * each. Bitrate, GOP and JPEG quality can change live (libxmvenc remakes
+ * the channel between frames). H.265 is libxmvenc's on the Mali-V550, not
+ * here yet. The hardware ceilings, from openxiongmai's re_defines.h:
  * VENC_MAX_CHN_NUM 4, VIU_MAX_CHN_NUM 3 (chn 0 plus extended channels),
  * RGN_MAX_CHN_NUM 3.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #if defined(PLATFORM_XM530)
@@ -18,7 +20,7 @@ const rss_hal_caps_t g_hal_caps = {
 
     .has_h265 = false,
     .has_rotation = false,
-    .has_set_bitrate = false,
+    .has_set_bitrate = true,
     .has_gop_attr = false,
     .has_capped_rc = false,
     .has_smart_rc = false,
@@ -27,8 +29,8 @@ const rss_hal_caps_t g_hal_caps = {
     .has_osd = false,
     .has_ivs = false,
 
-    .has_jpeg = false,
-    .has_jpeg_qp = false,
+    .has_jpeg = true,
+    .has_jpeg_qp = true,
     .jpeg_pulse = false,
 
     .has_color2grey = false,
@@ -36,10 +38,10 @@ const rss_hal_caps_t g_hal_caps = {
     .has_sinter = false,
     .has_drc = false,
     .has_temper = false,
-    .has_ae_comp = false,
+    .has_ae_comp = true,
 
     .max_sensors = 1,
-    .max_enc_channels = 0,
+    .max_enc_channels = 4,
     .max_fs_channels = 2,
     .max_enc_pixel_rate = 0,
 
