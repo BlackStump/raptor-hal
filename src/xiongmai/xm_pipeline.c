@@ -65,7 +65,7 @@ _Static_assert(sizeof(VIDEO_FRAME_INFO_S) <= sizeof(((xm_state_t *)0)->grab[0].f
  * backend has met.
  */
 static const xm_sensor_mode_t xm_modes[] = {
-    {"sc5332", 2576, 1936, 8, 4, 15},
+    {"sc5332", 2576, 1936, 8, 4, 15, 3300},
 };
 
 static const xm_sensor_mode_t *xm_find_mode(const char *name)
@@ -124,6 +124,7 @@ int xm_pipe_start(xm_state_t *st)
 
     /* the AE reads its attributes from the start, so they go in first */
     xm_isp_exposure_defaults();
+    xm_isp_set_timing(st->mode->fps, st->mode->vts);
 
     ret = ispApp(7, isp_argv);
     if (ret)

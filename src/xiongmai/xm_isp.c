@@ -27,12 +27,22 @@
  * table. Majestic's camera_set_color worked on the chroma block
  * (0x30071000) instead; matching that is the next step.
  *
+ * DAY AND NIGHT. On the IVG-83X50PSA-B the LED board's photosensor moves
+ * the IR-cut filter and lights the IR LEDs itself; ric only follows with
+ * the picture. Night is black and white -- CSC saturation 0, which the
+ * open ISP turns into Cb/Cr gains of 0 at once and keeps there -- and day
+ * puts back the CSC saturation that was there. ric decides from
+ * isp_get_exposure: lines x total gain, the AE's average luminance (by day
+ * only: at night it is the IR LEDs' light, not the scene's) and the
+ * white-balance gains, read from libisp_XM530's AE state and AWB.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
 #include "hal_internal.h"
 
 #include "mpi_ae.h"
+#include "mpi_awb.h"
 #include "mpi_isp.h"
 
 #include <string.h>
@@ -43,6 +53,9 @@
 #define XM_SYS_GAIN_MAX (128u << 10) /* 128x, 10-bit fraction */
 
 static int ae_comp_asked = -1;  /* -1: the sensor's own target */
+static double line_us = 0;      /* one sensor line, for exposure_time */
+static rss_isp_mode_t isp_mode = RSS_ISP_DAY;
+static int day_csc_sat = -1;    /* the CSC saturation night replaced */
 static int saturation_asked = -1; /* -1: the sensor's table */
 
 static int xm_exposure_write(int comp)
@@ -161,5 +174,83 @@ int hal_isp_get_saturation(void *ctx, int *val)
     if (XM_MPI_ISP_GetSaturationAttr(&a) != XM_SUCCESS)
         return RSS_ERR_IO;
     *val = a.enOpType == OP_TYPE_MANUAL ? a.stManual.u8Saturation : a.stAuto.au8Sat[0];
+    return RSS_OK;
+}
+
+/* The sensor's line time, from its timing (VTS lines a frame at fps) */
+void xm_isp_set_timing(unsigned fps, unsigned vts)
+{
+    line_us = fps && vts ? 1e6 / ((double)fps * vts) : 0;
+}
+
+int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure)
+{
+    ISP_INNER_STATE_INFO_S in;
+    ISP_WB_INFO_S wb;
+    uint64_t prod;
+
+    if (!ctx || !exposure)
+        return RSS_ERR_INVAL;
+    memset(exposure, 0, sizeof(*exposure));
+    memset(&in, 0, sizeof(in));
+    if (XM_MPI_ISP_QueryInnerStateInfo(0, &in) != XM_SUCCESS)
+        return RSS_ERR_IO;
+    if (!in.u32ExposureTime || !in.u32AllGain)
+        return RSS_ERR_BUSY; /* before the AE's first frame */
+
+    /* lines x total gain (1024 = 1x): 1 line at 1x is 1. On the SC5332 a
+     * lit room reads in the hundreds, the dark with the IR LEDs off up to
+     * 3296 lines x 124x, about 409000 */
+    prod = (uint64_t)in.u32ExposureTime * in.u32AllGain / 1024;
+    exposure->total_gain = prod > 0xffffffffu ? 0xffffffffu : (uint32_t)prod;
+    exposure->exposure_time = (uint32_t)(in.u32ExposureTime * line_us + 0.5);
+    exposure->ae_luma = in.u8AveLum;
+    exposure->valid_mask = RSS_EXPOSURE_VALID_TOTAL_GAIN |
+                           (line_us > 0 ? RSS_EXPOSURE_VALID_TIME : 0);
+    if (isp_mode != RSS_ISP_NIGHT)
+        exposure->valid_mask |= RSS_EXPOSURE_VALID_AE_LUMA;
+
+    memset(&wb, 0, sizeof(wb));
+    if (XM_MPI_ISP_QueryWBInfo(&wb) == XM_SUCCESS && wb.u16Ggain) {
+        /* 256 = 1x, green held at 1x by the open AWB */
+        exposure->wb_rgain = wb.u16Rgain;
+        exposure->wb_ggain = wb.u16Ggain;
+        exposure->wb_bgain = wb.u16Bgain;
+        exposure->valid_mask |= RSS_EXPOSURE_VALID_WB_RGAIN | RSS_EXPOSURE_VALID_WB_GGAIN |
+                                RSS_EXPOSURE_VALID_WB_BGAIN;
+    }
+    return RSS_OK;
+}
+
+int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
+{
+    ISP_CSC_ATTR_S c;
+
+    if (!ctx || (mode != RSS_ISP_DAY && mode != RSS_ISP_NIGHT))
+        return RSS_ERR_INVAL;
+    if (mode == isp_mode)
+        return RSS_OK;
+    memset(&c, 0, sizeof(c));
+    if (XM_MPI_ISP_GetCSCAttr(&c) != XM_SUCCESS) {
+        HAL_LOG_ERR("isp: XM_MPI_ISP_GetCSCAttr failed");
+        return RSS_ERR_IO;
+    }
+    if (mode == RSS_ISP_NIGHT) {
+        if (c.stManual.u8SatuVal)
+            day_csc_sat = c.stManual.u8SatuVal;
+        c.bEnable = XM_TRUE;
+        c.stManual.u8SatuVal = 0;
+    } else {
+        c.stManual.u8SatuVal = (XM_U8)(day_csc_sat > 0 ? day_csc_sat : 50);
+    }
+    if (XM_MPI_ISP_SetCSCAttr(&c) != XM_SUCCESS) {
+        HAL_LOG_ERR("isp: XM_MPI_ISP_SetCSCAttr failed");
+        return RSS_ERR_IO;
+    }
+    isp_mode = mode;
+    if (mode == RSS_ISP_NIGHT)
+        HAL_LOG_INFO("isp: night, black and white");
+    else
+        HAL_LOG_INFO("isp: day, colour (CSC saturation back to %d)", c.stManual.u8SatuVal);
     return RSS_OK;
 }

@@ -23,6 +23,7 @@ typedef struct {
     uint32_t width, height; /* what channel 0 delivers */
     uint32_t cap_x, cap_y;  /* where that window starts in the sensor frame */
     uint32_t fps;
+    uint32_t vts;           /* lines a frame, for the exposure time */
 } xm_sensor_mode_t;
 
 /* Encoder channels: rvd's main and sub H.264 (0, 1) and their JPEG
@@ -198,5 +199,8 @@ int hal_isp_set_ae_comp(void *ctx, int val);
 int hal_isp_get_ae_comp(void *ctx, int *val);
 int hal_isp_set_saturation(void *ctx, int val);
 int hal_isp_get_saturation(void *ctx, int *val);
+void xm_isp_set_timing(unsigned fps, unsigned vts);
+int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure);
+int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode);
 
 #endif /* XM_STATE_H */

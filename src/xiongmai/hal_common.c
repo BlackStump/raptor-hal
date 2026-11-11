@@ -388,6 +388,8 @@ static const rss_hal_ops_t g_ops = {
     .isp_set_sensor_fps = hal_isp_set_sensor_fps,
     .isp_set_ae_comp = hal_isp_set_ae_comp,
     .isp_get_ae_comp = hal_isp_get_ae_comp,
+    .isp_get_exposure = hal_isp_get_exposure,
+    .isp_set_running_mode = hal_isp_set_running_mode,
     .isp_set_saturation = hal_isp_set_saturation,
     .isp_get_saturation = hal_isp_get_saturation,
 
