@@ -13,9 +13,12 @@
  * xmvenc-test, for the same reason, snapshots the other VI channel.)
  * So the backend feeds them itself: one feeder thread per VI channel
  * takes each frame once, encodes it on every started channel bound there
- * that is due -- H.264 every frame, JPEG at its own rate -- copies the
- * output into that channel's queue, and gives the frame back. rvd's raw
- * frame grabs on a fed channel are served by the feeder as well.
+ * that is due, copies the output into that channel's queue, and gives the
+ * frame back. H.264 is encoded by the feeder, every frame; a JPEG that is
+ * due goes to the feeder's JPEG worker with its frame, so a 35 ms
+ * snapshot never stands between main and its next frame (inline, the
+ * snapshot frame took 79 ms of the 67 and main lost 2 frames a snapshot).
+ * rvd's raw frame grabs on a fed channel are served by the feeder too.
  *
  * Frames go to rvd as rss_frame_t: Annex B NALs with their start codes,
  * contiguous in one buffer the backend owns (rvd edits the SPS in place).
@@ -237,10 +240,10 @@ static int xm_enc_remake(xm_state_t *st, int chn)
     if (!enc->xchn)
         return RSS_OK; /* made at create; nothing yet */
     if (vi >= 0)
-        pthread_mutex_lock(&st->feed[vi].lock);
+        xm_feed_hold(st, vi);
     rc = xm_enc_make(st, chn);
     if (vi >= 0)
-        pthread_mutex_unlock(&st->feed[vi].lock);
+        xm_feed_release(st, vi);
     return rc;
 }
 
@@ -460,6 +463,71 @@ typedef struct {
     int vi;
 } xm_feeder_arg_t;
 
+/* Encode one frame on one channel and file it */
+static void xm_encode_one(xm_state_t *st, int chn, const VIDEO_FRAME_INFO_S *vf, bool idr,
+                          int64_t now)
+{
+    xm_enc_chn_t *enc = &st->enc[chn];
+    struct xmvenc_frame out;
+    size_t n;
+
+    if (idr)
+        xmvenc_chn_request_idr(enc->xchn);
+    memset(&out, 0, sizeof(out));
+    if (xmvenc_encode(enc->xchn, vf->stVFrame.u32PhyAddr[0], vf->stVFrame.u32PhyAddr[1], &out)) {
+        enc->st_fail++;
+        if (enc->st_fail == 1)
+            HAL_LOG_WARN("venc chn %d: encode failed (status 0x%x)", chn, out.status);
+        return;
+    }
+    n = xm_file(st, chn, &out, now);
+    enc->st_frames++;
+    enc->st_bytes += n;
+    enc->st_hw_us += (uint64_t)(out.us > 0 ? out.us : 0);
+    enc->st_qp = out.qp;
+    xm_stats(st, chn, now);
+}
+
+/*
+ * The JPEG worker of a feeder: encodes the snapshot frame it was handed
+ * while the feeder goes on with the next frames, then gives that frame
+ * back to VI. libxmvenc lets channels on different threads take turns on
+ * the encoder, so main's next frame waits at most one JPEG for it and
+ * catches up in the frames after.
+ */
+static void *xm_jpeg_worker(void *p)
+{
+    xm_feeder_arg_t a = *(xm_feeder_arg_t *)p;
+    xm_state_t *st = a.st;
+    xm_feeder_t *fd = &st->feed[a.vi];
+
+    free(p);
+    pthread_mutex_lock(&st->enc_lock);
+    for (;;) {
+        VIDEO_FRAME_INFO_S *vf = (VIDEO_FRAME_INFO_S *)fd->jframe;
+        int chn;
+        int64_t ts;
+
+        while (!fd->jbusy && !__atomic_load_n(&fd->stop, __ATOMIC_ACQUIRE))
+            pthread_cond_wait(&st->enc_cond, &st->enc_lock);
+        if (!fd->jbusy)
+            break; /* stopping, nothing in hand */
+        chn = fd->jchn;
+        ts = fd->jts;
+        pthread_mutex_unlock(&st->enc_lock);
+
+        if (st->enc[chn].xchn)
+            xm_encode_one(st, chn, vf, false, ts);
+        XM_MPI_VI_ReleaseFrame(a.vi, vf);
+
+        pthread_mutex_lock(&st->enc_lock);
+        fd->jbusy = false;
+        pthread_cond_broadcast(&st->enc_cond);
+    }
+    pthread_mutex_unlock(&st->enc_lock);
+    return NULL;
+}
+
 static void *xm_feeder(void *p)
 {
     xm_feeder_arg_t a = *(xm_feeder_arg_t *)p;
@@ -472,6 +540,7 @@ static void *xm_feeder(void *p)
     while (!__atomic_load_n(&fd->stop, __ATOMIC_ACQUIRE)) {
         VIDEO_FRAME_INFO_S vf;
         int chn, idle = 1;
+        bool handed = false;
         int64_t now;
 
         pthread_mutex_lock(&st->enc_lock);
@@ -507,40 +576,33 @@ static void *xm_feeder(void *p)
         pthread_mutex_lock(&fd->lock);
         for (chn = 0; chn < XM_ENC_CHN_MAX; chn++) {
             xm_enc_chn_t *enc = &st->enc[chn];
-            struct xmvenc_frame out;
-            bool go, idr;
-            size_t n;
+            bool go, idr, jpeg = is_jpeg(enc->codec);
 
             pthread_mutex_lock(&st->enc_lock);
+            /* a JPEG goes to the worker, one at a time: while it is still
+             * on the last one, this frame is not taken for the next */
             go = enc->vi == a.vi && enc->started && enc->xchn &&
                  vf.stVFrame.u32Width == enc->width && vf.stVFrame.u32Height == enc->height &&
-                 xm_due(enc, is_jpeg(enc->codec) ? (enc->fps_num && enc->fps_den
-                                                        ? (double)enc->fps_num / enc->fps_den
-                                                        : 1.0)
-                                                  : xm_enc_rate(st, enc),
+                 !(jpeg && (fd->jbusy || handed)) &&
+                 xm_due(enc, jpeg ? (enc->fps_num && enc->fps_den
+                                         ? (double)enc->fps_num / enc->fps_den
+                                         : 1.0)
+                                  : xm_enc_rate(st, enc),
                         snr, now);
             idr = enc->want_idr;
-            enc->want_idr = false;
-            pthread_mutex_unlock(&st->enc_lock);
-            if (!go)
-                continue;
-            if (idr)
-                xmvenc_chn_request_idr(enc->xchn);
-
-            memset(&out, 0, sizeof(out));
-            if (xmvenc_encode(enc->xchn, vf.stVFrame.u32PhyAddr[0], vf.stVFrame.u32PhyAddr[1],
-                              &out)) {
-                enc->st_fail++;
-                if (enc->st_fail == 1)
-                    HAL_LOG_WARN("venc chn %d: encode failed (status 0x%x)", chn, out.status);
-                continue;
+            if (go)
+                enc->want_idr = false;
+            if (go && jpeg) {
+                memcpy(fd->jframe, &vf, sizeof(vf));
+                fd->jchn = chn;
+                fd->jts = now;
+                fd->jbusy = true;
+                handed = true;
+                pthread_cond_broadcast(&st->enc_cond);
             }
-            n = xm_file(st, chn, &out, now);
-            enc->st_frames++;
-            enc->st_bytes += n;
-            enc->st_hw_us += (uint64_t)(out.us > 0 ? out.us : 0);
-            enc->st_qp = out.qp;
-            xm_stats(st, chn, now);
+            pthread_mutex_unlock(&st->enc_lock);
+            if (go && !jpeg)
+                xm_encode_one(st, chn, &vf, idr, now);
         }
 
         if (fd->grab_req && !fd->grab_done) {
@@ -550,7 +612,8 @@ static void *xm_feeder(void *p)
             pthread_cond_broadcast(&st->enc_cond);
             pthread_mutex_unlock(&st->enc_lock);
         }
-        XM_MPI_VI_ReleaseFrame(a.vi, &vf);
+        if (!handed) /* else the worker gives it back */
+            XM_MPI_VI_ReleaseFrame(a.vi, &vf);
         pthread_mutex_unlock(&fd->lock);
     }
     return NULL;
@@ -559,23 +622,41 @@ static void *xm_feeder(void *p)
 static int xm_feeder_start(xm_state_t *st, int vi)
 {
     xm_feeder_t *fd = &st->feed[vi];
-    xm_feeder_arg_t *a;
+    xm_feeder_arg_t *a, *b;
 
     if (fd->running)
         return RSS_OK;
     a = malloc(sizeof(*a));
-    if (!a)
+    b = malloc(sizeof(*b));
+    if (!a || !b) {
+        free(a);
+        free(b);
         return RSS_ERR_NOMEM;
-    a->st = st;
-    a->vi = vi;
+    }
+    a->st = b->st = st;
+    a->vi = b->vi = vi;
     fd->stop = false;
+    fd->jbusy = false;
+    if (pthread_create(&fd->jthread, NULL, xm_jpeg_worker, b)) {
+        free(a);
+        free(b);
+        HAL_LOG_ERR("feeder %d: pthread_create (JPEG worker) failed", vi);
+        return RSS_ERR_IO;
+    }
+    fd->jrunning = true;
     if (pthread_create(&fd->thread, NULL, xm_feeder, a)) {
         free(a);
         HAL_LOG_ERR("feeder %d: pthread_create failed", vi);
+        __atomic_store_n(&fd->stop, true, __ATOMIC_RELEASE);
+        pthread_mutex_lock(&st->enc_lock);
+        pthread_cond_broadcast(&st->enc_cond);
+        pthread_mutex_unlock(&st->enc_lock);
+        pthread_join(fd->jthread, NULL);
+        fd->jrunning = false;
         return RSS_ERR_IO;
     }
     fd->running = true;
-    HAL_LOG_INFO("feeder %d: VI channel %d feeds its encoders", vi, vi);
+    HAL_LOG_INFO("feeder %d: VI channel %d feeds its encoders (JPEG on a worker)", vi, vi);
     return RSS_OK;
 }
 
@@ -583,14 +664,36 @@ static void xm_feeder_stop(xm_state_t *st, int vi)
 {
     xm_feeder_t *fd = &st->feed[vi];
 
-    if (!fd->running)
+    if (!fd->running && !fd->jrunning)
         return;
     __atomic_store_n(&fd->stop, true, __ATOMIC_RELEASE);
     pthread_mutex_lock(&st->enc_lock);
     pthread_cond_broadcast(&st->enc_cond);
     pthread_mutex_unlock(&st->enc_lock);
-    pthread_join(fd->thread, NULL);
+    if (fd->running)
+        pthread_join(fd->thread, NULL);
     fd->running = false;
+    /* the worker finishes a snapshot in hand (and gives its frame back)
+     * before it sees the stop */
+    if (fd->jrunning)
+        pthread_join(fd->jthread, NULL);
+    fd->jrunning = false;
+}
+
+void xm_feed_hold(xm_state_t *st, int vi)
+{
+    xm_feeder_t *fd = &st->feed[vi];
+
+    pthread_mutex_lock(&fd->lock); /* the feeder between frames */
+    pthread_mutex_lock(&st->enc_lock);
+    while (fd->jbusy) /* and no snapshot frame out */
+        pthread_cond_wait(&st->enc_cond, &st->enc_lock);
+    pthread_mutex_unlock(&st->enc_lock);
+}
+
+void xm_feed_release(xm_state_t *st, int vi)
+{
+    pthread_mutex_unlock(&st->feed[vi].lock);
 }
 
 /* rvd's fs_get_frame on a fed channel: the feeder copies its next frame */
@@ -712,7 +815,7 @@ int hal_enc_destroy_channel(void *ctx, int chn)
     hal_enc_stop(ctx, chn);
     vi = enc->vi;
     if (vi >= 0)
-        pthread_mutex_lock(&st->feed[vi].lock);
+        xm_feed_hold(st, vi);
     pthread_mutex_lock(&st->enc_lock);
     enc->vi = -1;
     enc->created = false;
@@ -721,7 +824,7 @@ int hal_enc_destroy_channel(void *ctx, int chn)
         xmvenc_chn_destroy(enc->xchn);
     enc->xchn = NULL;
     if (vi >= 0)
-        pthread_mutex_unlock(&st->feed[vi].lock);
+        xm_feed_release(st, vi);
     return RSS_OK;
 }
 
@@ -758,11 +861,11 @@ static int xm_unbind(xm_state_t *st, int chn)
 
     if (vi < 0)
         return RSS_OK;
-    pthread_mutex_lock(&st->feed[vi].lock);
+    xm_feed_hold(st, vi);
     pthread_mutex_lock(&st->enc_lock);
     enc->vi = -1;
     pthread_mutex_unlock(&st->enc_lock);
-    pthread_mutex_unlock(&st->feed[vi].lock);
+    xm_feed_release(st, vi);
     return RSS_OK;
 }
 

@@ -75,6 +75,16 @@ typedef struct {
     bool running, stop;
     pthread_mutex_t lock; /* held over one frame: encodes, grab, release */
     bool grab_req, grab_done;
+
+    /* The JPEG worker: a snapshot of the frame the feeder hands it, encoded
+     * on the encoder's spare time while the feeder goes on (a 5 MP JPEG
+     * takes 35 ms of hardware, main's H.264 44 of the 67 a frame has).
+     * The worker holds that VI frame until it is done. Under enc_lock. */
+    pthread_t jthread;
+    bool jrunning, jbusy;
+    int jchn;
+    int64_t jts;
+    uint8_t jframe[96]; /* VIDEO_FRAME_INFO_S, opaque here */
 } xm_feeder_t;
 
 typedef struct {
@@ -155,6 +165,10 @@ int xm_frame_copy(xm_state_t *st, int chn, const void *vf);
 int xm_enc_init(xm_state_t *st);
 void xm_enc_deinit(xm_state_t *st);
 int xm_enc_grab(xm_state_t *st, int chn); /* a raw frame from a fed channel */
+/* VI channel vi with no frame held by its feeder or JPEG worker, until
+ * xm_feed_release: for VI attribute changes and disables */
+void xm_feed_hold(xm_state_t *st, int vi);
+void xm_feed_release(xm_state_t *st, int vi);
 int hal_enc_create_group(void *ctx, int grp);
 int hal_enc_destroy_group(void *ctx, int grp);
 int hal_enc_create_channel(void *ctx, int chn, const rss_video_config_t *cfg);

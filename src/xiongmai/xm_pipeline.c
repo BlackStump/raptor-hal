@@ -403,10 +403,10 @@ int hal_fs_disable_channel(void *ctx, int chn)
         xm_grab_drop(st, c);
         /* not under a frame the feeder holds */
         if (st->enc_ready)
-            pthread_mutex_lock(&st->feed[c].lock);
+            xm_feed_hold(st, c);
         XM_MPI_VI_DisableChn(c);
         if (st->enc_ready)
-            pthread_mutex_unlock(&st->feed[c].lock);
+            xm_feed_release(st, c);
         st->fs[c].enabled = false;
     }
     return RSS_OK;
