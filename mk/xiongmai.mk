@@ -21,9 +21,10 @@
 # THE SDK is openxiongmai (github.com/OpenIPC/openxiongmai, GPL-3.0), not a
 # vendor blob. Unlike the HiSilicon and Fullhan backends nothing is
 # dlopened: the stock image has no libmpi.so to open (majestic links the
-# XM_MPI_* layer statically), so rvd links openxiongmai's libopenmpi.a,
-# built from source with this toolchain. raptor-hal needs only its headers;
-# raptor's Makefile links the archive (XM_MPI_LIB there).
+# XM_MPI_* layer statically). rvd links openxiongmai's libxmhost.so (the
+# MPI built in, plus what majestic gave the ISP libraries),
+# libispapp_XM530.so, libisp_XM530.so and libsns.so, built from source with
+# this toolchain by raptor's Makefile. raptor-hal needs only headers.
 XIONGMAI_PLATFORMS := XM530
 
 ifneq ($(filter $(PLATFORM),$(XIONGMAI_PLATFORMS)),)
@@ -42,9 +43,17 @@ SDK_INCLUDE := $(XM_SDK)/include
 BACKEND_DIR := src/xiongmai
 HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
 
-# Phase 1: the skeleton. hal_common.c is HAL_COMMON_SRC (compiled into both
-# archives); hal_gpio.c is vendor-neutral sysfs. Each later phase adds the
-# files it writes, and only files that exist.
-VIDEO_SRCS := src/hal_gpio.c
+# hal_common.c is HAL_COMMON_SRC (compiled into both archives); hal_gpio.c
+# is vendor-neutral sysfs. Phase 2a adds xm_pipeline.c (xmhost_start,
+# ispApp, the VI framesources) and xm_isp.c (exposure and saturation
+# attributes). Each later phase adds the files it writes, and only files
+# that exist.
+VIDEO_SRCS := $(BACKEND_DIR)/xm_pipeline.c \
+              $(BACKEND_DIR)/xm_isp.c \
+              src/hal_gpio.c
+
+# xm_isp.c alone speaks the ISP library's headers (isp/include/isp), which
+# carry their own XM_* types; they stay out of every other object.
+$(BACKEND_DIR)/xm_isp.o: CFLAGS += -I$(XM_SDK)/isp/include/isp -I$(XM_SDK)/isp/include/xm
 AUDIO_SRCS :=
 endif

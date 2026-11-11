@@ -2,8 +2,8 @@
  * xiongmai/xm_common.h -- shared declarations for the Xiongmai XM530-family
  * backend.
  *
- * The MPI is openxiongmai's open reimplementation (libraries/libmpi, built as
- * libopenmpi.a and linked into the daemon), declared by its own re_*.h
+ * The MPI is openxiongmai's open reimplementation (libraries/libmpi, built
+ * into libxmhost.so, which rvd links), declared by its own re_*.h
  * headers through SDK_INCLUDE. Unlike the HiSilicon and Fullhan backends
  * there is no dlopen and no ABI transcription here: the headers and the
  * implementation come from the same tree.

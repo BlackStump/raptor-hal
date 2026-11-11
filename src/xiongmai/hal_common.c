@@ -1,15 +1,17 @@
 /*
  * xiongmai/hal_common.c -- Raptor HAL common layer, Xiongmai XM530 family
  *
- * Phase 1 skeleton, in the shape of src/fhan_v2/hal_common.c at its own
- * Phase 1 (3cc05ae): the vtable publishes only the ops that exist,
- * RSS_HAL_CALL() answers RSS_ERR_NOTSUP for the rest, and a Phase 1 rvd comes
- * up, reaches XM_MPI_SYS_Init, logs the chip, finds no framesource and exits
- * cleanly.
+ * Phase 2a: sensor, ISP and the VI framesources (xm_pipeline.c, xm_isp.c).
+ * Shaped like src/fhan_v2/hal_common.c: the vtable publishes only the ops
+ * that exist,
+ * RSS_HAL_CALL() answers RSS_ERR_NOTSUP for the rest. A Phase 2a rvd brings
+ * the sensor and ISP up, creates its framesources and stops at the first
+ * encoder, which is Phase 2b.
  *
- * What it does not need, unlike Fullhan: a uClibc bridge or any dlopen. The
- * MPI is openxiongmai's libopenmpi.a, built with the same musl toolchain and
- * linked into the daemon by raptor's Makefile.
+ * What it does not need, unlike Fullhan: a uClibc bridge or any dlopen. rvd
+ * links openxiongmai's libxmhost.so (the MPI built in), libispapp_XM530.so,
+ * the open libisp_XM530.so and libsns.so, all built with the same musl
+ * toolchain by raptor's Makefile.
  *
  * Copyright (C) 2026 Thingino Project
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -191,17 +193,17 @@ static int xm_check_devices(void)
  * ================================================================ */
 
 /*
- * hal_init -- bring the MPI up as far as XM_MPI_SYS_Init.
+ * hal_init -- bring the system, the sensor and the ISP up.
  *
- * TEARDOWN-FIRST BY CONSTRUCTION: XM_MPI_SYS_Init begins with an MMZ reset,
- * so a previous rvd that was killed rather than closed leaves nothing behind
- * that a restart has to undo -- the reverse of HiMPP, where hal_init has to
- * call SYS_Exit and VB_Exit itself. The same reset is why a running
- * majestic is refused rather than shared with.
+ * TEARDOWN-FIRST BY CONSTRUCTION: xmhost_start stops what a previous
+ * program left running (the 3D NR, VI channels 1 and 0) and then
+ * XM_MPI_SYS_Init resets MMZ, so a previous rvd that was killed rather than
+ * closed leaves nothing a restart has to undo -- the reverse of HiMPP,
+ * where hal_init has to call SYS_Exit and VB_Exit itself. The same reset is
+ * why a running majestic is refused rather than shared with.
  *
- * There is no XM_MPI_SYS_Exit, and the MPI's file descriptors are private to
- * libopenmpi.a, so hal_deinit has nothing to undo yet; Phase 2 adds the VI
- * and VENC teardown.
+ * There is no XM_MPI_SYS_Exit; hal_deinit disables the VI channels and
+ * leaves the rest to the next start.
  */
 static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
 {
@@ -252,6 +254,15 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
     if (ret)
         goto err_free;
 
+#ifdef HAL_MODULE_VIDEO
+    /* Phase 2a: libxmhost's start (3D NR stopped, VI quiet, SYS_Init),
+     * then the sensor and the ISP through libispapp. */
+    ret = xm_pipe_start(st);
+    if (ret)
+        goto err_free;
+    HAL_LOG_INFO("hal_init: sensor and ISP up; framesources are VI 0 and extended 1; "
+                 "the encoder is Phase 2b");
+#else
     ret = XM_MPI_SYS_Init();
     if (ret) {
         HAL_LOG_ERR("sys: XM_MPI_SYS_Init failed %d (0x%x)", ret, (unsigned)ret);
@@ -259,9 +270,8 @@ static int hal_init(void *ctx, const rss_multi_sensor_config_t *cfg)
         goto err_free;
     }
     st->sys_inited = true;
-
-    HAL_LOG_INFO("hal_init: MPI up to XM_MPI_SYS_Init (MMZ reset, VI and RGN open); "
-                 "the pipeline is not implemented yet (Phase 2)");
+    HAL_LOG_INFO("hal_init: MPI up to XM_MPI_SYS_Init");
+#endif
 
     g_xm = st;
     c->initialized = true;
@@ -283,6 +293,9 @@ static int hal_deinit(void *ctx)
     if (!st)
         return RSS_OK;
 
+#ifdef HAL_MODULE_VIDEO
+    xm_pipe_stop(st);
+#endif
     if (g_xm == st)
         g_xm = NULL;
 
@@ -338,6 +351,23 @@ static const rss_hal_ops_t g_ops = {
     .sys_get_cpu_info = hal_sys_get_cpu_info,
 
 #ifdef HAL_MODULE_VIDEO
+    .fs_create_channel = hal_fs_create_channel,
+    .fs_destroy_channel = hal_fs_destroy_channel,
+    .fs_enable_channel = hal_fs_enable_channel,
+    .fs_disable_channel = hal_fs_disable_channel,
+    .fs_set_fifo = hal_fs_set_fifo,
+    .fs_set_frame_depth = hal_fs_set_frame_depth,
+    .fs_get_frame = hal_fs_get_frame,
+    .fs_release_frame = hal_fs_release_frame,
+
+    .isp_get_sensor_attr = hal_isp_get_sensor_attr,
+    .isp_get_sensor_fps = hal_isp_get_sensor_fps,
+    .isp_set_sensor_fps = hal_isp_set_sensor_fps,
+    .isp_set_ae_comp = hal_isp_set_ae_comp,
+    .isp_get_ae_comp = hal_isp_get_ae_comp,
+    .isp_set_saturation = hal_isp_set_saturation,
+    .isp_get_saturation = hal_isp_get_saturation,
+
     .gpio_set = hal_gpio_set,
     .gpio_get = hal_gpio_get,
     .ircut_set = hal_ircut_set,

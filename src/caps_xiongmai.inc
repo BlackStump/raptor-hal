@@ -4,10 +4,11 @@
  * Included from the #else arm of caps_fullhan.inc's platform chain, and so
  * owns the unknown-platform #error. Fork-local; see FORK.md.
  *
- * Phase 1 promises nothing: no framesource, no encoder, so rvd brings the
- * HAL up, finds nothing to build and exits. The hardware ceilings for later
- * phases, from openxiongmai's re_defines.h: VENC_MAX_CHN_NUM 4,
- * VIU_MAX_CHN_NUM 3 (chn 0 plus extended channels), RGN_MAX_CHN_NUM 3.
+ * Phase 2a: two framesources (VI channel 0 at the sensor window, and
+ * extended channel 1, scaled), no encoder yet, so rvd stops at its first
+ * encoder. The hardware ceilings, from openxiongmai's re_defines.h:
+ * VENC_MAX_CHN_NUM 4, VIU_MAX_CHN_NUM 3 (chn 0 plus extended channels),
+ * RGN_MAX_CHN_NUM 3.
  */
 
 #if defined(PLATFORM_XM530)
@@ -22,7 +23,7 @@ const rss_hal_caps_t g_hal_caps = {
     .has_capped_rc = false,
     .has_smart_rc = false,
 
-    .has_framesource = false,
+    .has_framesource = true,
     .has_osd = false,
     .has_ivs = false,
 
@@ -39,7 +40,7 @@ const rss_hal_caps_t g_hal_caps = {
 
     .max_sensors = 1,
     .max_enc_channels = 0,
-    .max_fs_channels = 0,
+    .max_fs_channels = 2,
     .max_enc_pixel_rate = 0,
 
     .max_osd_regions = 0,
