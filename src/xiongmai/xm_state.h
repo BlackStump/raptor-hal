@@ -192,6 +192,21 @@ int hal_enc_get_jpeg_qp(void *ctx, int chn, int *qp);
 int hal_enc_get_fps(void *ctx, int chn, uint32_t *fps_num, uint32_t *fps_den);
 int hal_enc_get_avg_bitrate(void *ctx, int chn, uint32_t *bitrate);
 
+/* xm_osd.c */
+int hal_osd_set_pool_size(void *ctx, uint32_t bytes);
+int hal_osd_create_group(void *ctx, int grp);
+int hal_osd_destroy_group(void *ctx, int grp);
+int hal_osd_create_region(void *ctx, int *handle, const rss_osd_region_t *attr);
+int hal_osd_destroy_region(void *ctx, int handle);
+int hal_osd_register_region(void *ctx, int handle, int grp);
+int hal_osd_unregister_region(void *ctx, int handle, int grp);
+int hal_osd_set_region_attr(void *ctx, int handle, const rss_osd_region_t *attr);
+int hal_osd_update_region_data(void *ctx, int handle, const uint8_t *data);
+int hal_osd_show_region(void *ctx, int handle, int grp, int show, int layer);
+int hal_osd_start(void *ctx, int grp);
+int hal_osd_stop(void *ctx, int grp);
+void xm_osd_deinit(void);
+
 /* xm_isp.c -- the ISP library's attributes, kept out of the MPI headers'
  * translation unit (the two header sets are not meant to meet). */
 int xm_isp_exposure_defaults(void);

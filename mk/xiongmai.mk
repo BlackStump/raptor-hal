@@ -51,6 +51,7 @@ HAL_COMMON_SRC := $(BACKEND_DIR)/hal_common.c
 VIDEO_SRCS := $(BACKEND_DIR)/xm_pipeline.c \
               $(BACKEND_DIR)/xm_isp.c \
               $(BACKEND_DIR)/xm_encoder.c \
+              $(BACKEND_DIR)/xm_osd.c \
               src/hal_gpio.c
 
 # Phase 2b: xm_encoder.c on libxmvenc (static, MIT); raptor's Makefile links

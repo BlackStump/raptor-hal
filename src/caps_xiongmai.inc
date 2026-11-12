@@ -6,7 +6,9 @@
  * libxmvenc (the Hantro H1): H.264 main and sub, and a JPEG channel beside
  * each. Bitrate, GOP and JPEG quality can change live (libxmvenc remakes
  * the channel between frames). H.265 is libxmvenc's on the Mali-V550, not
- * here yet. The hardware ceilings, from openxiongmai's re_defines.h:
+ * here yet. OSD: VI draws up to 8 overlays (1 or 2 bits a pixel, 8 KiB of
+ * bitmap memory) and 32 covers on each of its two stream channels. The
+ * hardware ceilings, from openxiongmai's re_defines.h:
  * VENC_MAX_CHN_NUM 4, VIU_MAX_CHN_NUM 3 (chn 0 plus extended channels),
  * RGN_MAX_CHN_NUM 3.
  *
@@ -26,7 +28,7 @@ const rss_hal_caps_t g_hal_caps = {
     .has_smart_rc = false,
 
     .has_framesource = true,
-    .has_osd = false,
+    .has_osd = true,
     .has_ivs = false,
 
     .has_jpeg = true,
@@ -45,8 +47,8 @@ const rss_hal_caps_t g_hal_caps = {
     .max_fs_channels = 2,
     .max_enc_pixel_rate = 0,
 
-    .max_osd_regions = 0,
-    .max_osd_groups = 0,
+    .max_osd_regions = 16,
+    .max_osd_groups = 2,
 
     .uses_xburst2 = false,
     .uses_new_sdk = false,

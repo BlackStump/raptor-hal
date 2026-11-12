@@ -146,6 +146,7 @@ void xm_pipe_stop(xm_state_t *st)
 
     if (!st)
         return;
+    xm_osd_deinit();   /* take the overlays off the picture */
     xm_enc_deinit(st); /* feeders first: they hold VI frames */
     for (chn = XM_FS_CHN_MAX - 1; chn >= 0; chn--) {
         xm_grab_drop(st, chn);
