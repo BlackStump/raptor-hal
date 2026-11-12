@@ -202,5 +202,6 @@ int hal_isp_get_saturation(void *ctx, int *val);
 void xm_isp_set_timing(unsigned fps, unsigned vts);
 int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure);
 int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode);
+int hal_isp_set_antiflicker(void *ctx, rss_antiflicker_t mode);
 
 #endif /* XM_STATE_H */

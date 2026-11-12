@@ -27,6 +27,10 @@
  * table. Majestic's camera_set_color worked on the chroma block
  * (0x30071000) instead; matching that is the next step.
  *
+ * ANTI-FLICKER. The open AE's own: with stAntiflicker set it holds the
+ * exposure to whole mains periods. isp_set_antiflicker sets it, kept
+ * across every exposure write.
+ *
  * DAY AND NIGHT. On the IVG-83X50PSA-B the LED board's photosensor moves
  * the IR-cut filter and lights the IR LEDs itself; ric only follows with
  * the picture. Night is black and white -- CSC saturation 0, which the
@@ -53,6 +57,7 @@
 #define XM_SYS_GAIN_MAX (128u << 10) /* 128x, 10-bit fraction */
 
 static int ae_comp_asked = -1;  /* -1: the sensor's own target */
+static int flicker_hz = 0;      /* 0 off, 50 or 60: exposure in whole mains periods */
 static double line_us = 0;      /* one sensor line, for exposure_time */
 static rss_isp_mode_t isp_mode = RSS_ISP_DAY;
 static int day_csc_sat = -1;    /* the CSC saturation night replaced */
@@ -71,6 +76,10 @@ static int xm_exposure_write(int comp)
     a.stAuto.stSysGainRange.u32Min = 1u << 10;
     a.stAuto.stSysGainRange.u32Max = XM_SYS_GAIN_MAX;
     a.stAuto.u8Compensation = (XM_U8)(comp < 0 ? 0 : comp);
+    /* the open AE reads this every frame and keeps the exposure to whole
+     * flicker periods (10 ms at 50 Hz, 8.3 at 60), at least one */
+    a.stAuto.stAntiflicker.bEnable = flicker_hz ? XM_TRUE : XM_FALSE;
+    a.stAuto.stAntiflicker.u8Frequency = (XM_U8)flicker_hz;
     if (XM_MPI_ISP_SetExposureAttr(0, &a) != XM_SUCCESS) {
         HAL_LOG_ERR("isp: XM_MPI_ISP_SetExposureAttr failed");
         return RSS_ERR_IO;
@@ -252,5 +261,37 @@ int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode)
         HAL_LOG_INFO("isp: night, black and white");
     else
         HAL_LOG_INFO("isp: day, colour (CSC saturation back to %d)", c.stManual.u8SatuVal);
+    return RSS_OK;
+}
+
+int hal_isp_set_antiflicker(void *ctx, rss_antiflicker_t mode)
+{
+    int old = flicker_hz, rc;
+
+    if (!ctx)
+        return RSS_ERR_INVAL;
+    switch (mode) {
+    case RSS_ANTIFLICKER_OFF:
+        flicker_hz = 0;
+        break;
+    case RSS_ANTIFLICKER_50HZ:
+        flicker_hz = 50;
+        break;
+    case RSS_ANTIFLICKER_60HZ:
+        flicker_hz = 60;
+        break;
+    default:
+        return RSS_ERR_INVAL;
+    }
+    rc = xm_exposure_write(ae_comp_asked);
+    if (rc) {
+        flicker_hz = old;
+        return rc;
+    }
+    if (flicker_hz)
+        HAL_LOG_INFO("isp: anti-flicker %d Hz (exposure in whole %.1f ms periods)", flicker_hz,
+                     500.0 / flicker_hz);
+    else
+        HAL_LOG_INFO("isp: anti-flicker off");
     return RSS_OK;
 }

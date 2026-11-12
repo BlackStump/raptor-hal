@@ -390,6 +390,7 @@ static const rss_hal_ops_t g_ops = {
     .isp_get_ae_comp = hal_isp_get_ae_comp,
     .isp_get_exposure = hal_isp_get_exposure,
     .isp_set_running_mode = hal_isp_set_running_mode,
+    .isp_set_antiflicker = hal_isp_set_antiflicker,
     .isp_set_saturation = hal_isp_set_saturation,
     .isp_get_saturation = hal_isp_get_saturation,
 
