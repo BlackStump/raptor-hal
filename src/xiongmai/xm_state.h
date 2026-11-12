@@ -203,5 +203,7 @@ void xm_isp_set_timing(unsigned fps, unsigned vts);
 int hal_isp_get_exposure(void *ctx, rss_exposure_t *exposure);
 int hal_isp_set_running_mode(void *ctx, rss_isp_mode_t mode);
 int hal_isp_set_antiflicker(void *ctx, rss_antiflicker_t mode);
+int hal_isp_set_hflip(void *ctx, int enable);
+int hal_isp_set_vflip(void *ctx, int enable);
 
 #endif /* XM_STATE_H */

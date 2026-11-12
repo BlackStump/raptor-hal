@@ -27,6 +27,14 @@
  * table. Majestic's camera_set_color worked on the chroma block
  * (0x30071000) instead; matching that is the next step.
  *
+ * MIRROR AND FLIP. The sensor's: XM_MPI_ISP_SetChnAttr in sensor mode hands
+ * them to the sensor library (the SC5332's sets 0x3221), which moves the
+ * ISP's input crop a Bayer step with them (libispapp's VI_WinSet: 8 pixels
+ * across, 4 down) and refreshes the MIPI frame. The output window is cut
+ * after the ISP, so it is the same with them as without. Nothing is called
+ * while both stay off: VI_WinSet's first call also sets the pixel-clock
+ * edge, which nothing has needed while the picture is the right way up.
+ *
  * ANTI-FLICKER. The open AE's own: with stAntiflicker set it holds the
  * exposure to whole mains periods. isp_set_antiflicker sets it, kept
  * across every exposure write.
@@ -58,6 +66,7 @@
 
 static int ae_comp_asked = -1;  /* -1: the sensor's own target */
 static int flicker_hz = 0;      /* 0 off, 50 or 60: exposure in whole mains periods */
+static int mirror_on, flip_on;  /* what the sensor was last set to (0, 0 at start) */
 static double line_us = 0;      /* one sensor line, for exposure_time */
 static rss_isp_mode_t isp_mode = RSS_ISP_DAY;
 static int day_csc_sat = -1;    /* the CSC saturation night replaced */
@@ -294,4 +303,38 @@ int hal_isp_set_antiflicker(void *ctx, rss_antiflicker_t mode)
     else
         HAL_LOG_INFO("isp: anti-flicker off");
     return RSS_OK;
+}
+
+static int xm_mirror_flip(int mirror, int flip)
+{
+    ISP_CHN_ATTR_S c;
+
+    mirror = !!mirror;
+    flip = !!flip;
+    if (mirror == mirror_on && flip == flip_on)
+        return RSS_OK;
+    memset(&c, 0, sizeof(c));
+    XM_MPI_ISP_GetChnAttr(&c);
+    c.bMode = XM_FALSE; /* the sensor does it */
+    c.bMirror = mirror ? XM_TRUE : XM_FALSE;
+    c.bFlip = flip ? XM_TRUE : XM_FALSE;
+    if (XM_MPI_ISP_SetChnAttr(&c) != XM_SUCCESS) {
+        HAL_LOG_ERR("isp: XM_MPI_ISP_SetChnAttr (mirror %d, flip %d) failed", mirror, flip);
+        return RSS_ERR_IO;
+    }
+    mirror_on = mirror;
+    flip_on = flip;
+    HAL_LOG_INFO("isp: mirror %s, flip %s", mirror ? "on" : "off", flip ? "on" : "off");
+    return RSS_OK;
+}
+
+/* hflip is the sensor's mirror (left-right), vflip its flip (upside down) */
+int hal_isp_set_hflip(void *ctx, int enable)
+{
+    return ctx ? xm_mirror_flip(enable, flip_on) : RSS_ERR_INVAL;
+}
+
+int hal_isp_set_vflip(void *ctx, int enable)
+{
+    return ctx ? xm_mirror_flip(mirror_on, enable) : RSS_ERR_INVAL;
 }
