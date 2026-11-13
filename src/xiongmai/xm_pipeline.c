@@ -109,10 +109,23 @@ int xm_pipe_start(xm_state_t *st)
     memset(st->fs_applied, 0, sizeof(st->fs_applied));
     xm_enc_init(st);
 
-    if (!ae || strcmp(ae, "1") || !awb || strcmp(awb, "1"))
+    /* The open AE and AWB in libisp_XM530 are opt-in by environment, and
+     * without them nothing runs the 3A (majestic did): the picture goes
+     * black or green. They are this platform's 3A, so rvd turns them on
+     * for itself unless the environment already says otherwise -- an init
+     * script need not know. */
+    if (!ae) {
+        setenv("LIBISP_OPEN_AE", "1", 0);
+        ae = "1";
+    }
+    if (!awb) {
+        setenv("LIBISP_OPEN_AWB", "1", 0);
+        awb = "1";
+    }
+    if (strcmp(ae, "1") || strcmp(awb, "1"))
         HAL_LOG_WARN("isp: LIBISP_OPEN_AE=%s LIBISP_OPEN_AWB=%s; without both at 1 nothing runs "
-                     "the 3A (majestic did) and the picture goes black or green",
-                     ae ? ae : "(unset)", awb ? awb : "(unset)");
+                     "the 3A and the picture goes black or green",
+                     ae, awb);
 
     ret = xmhost_start();
     if (ret) {
