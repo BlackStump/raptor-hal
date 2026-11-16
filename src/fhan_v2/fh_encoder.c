@@ -655,11 +655,60 @@ int hal_fs_destroy_channel(void *ctx, int chn)
  *   [4] 0xa37e0000  Y phys          [10..11]        pts
  *   [5] 0xb5880000  Y virt
  *
- * (not the FH8852V201 decompile's order). The planes are packed at the
- * width, so the stride is the width; the configured height is copied from
- * the padded one. Width, the padded height and both sizes are checked on
- * every call; a record that does not fit is logged once and refused.
+ * (not the FH8852V201 decompile's order). Width, the padded height and
+ * both sizes are checked on every call; a record that does not fit is
+ * logged once and refused.
+ *
+ * Format 1 is not raster: it is the encoder's block layout (worked out
+ * from PB4 frames, 2026-11-16). The luma is 16x16 macroblocks, left to
+ * right and top to bottom, [1] = 10240 bytes per macroblock row; each
+ * macroblock is four 8x8 blocks -- top left, top right, bottom left,
+ * bottom right -- each 8 rows of 8 bytes. The chroma (NV12, UV
+ * interleaved) follows the same scheme at half height: a macroblock's
+ * 16 bytes x 8 rows as two 8x8 blocks, left then right. Copied straight,
+ * a frame was scrambled (motion only compares frames, so it got by;
+ * positions, crops and save raw did not) and its last 8 rows were lost.
+ * It is put back into raster order here. The luma layout is checked
+ * against a reference frame; the chroma's against nothing yet (night
+ * frames are grey).
  */
+
+/* Format 1's luma: 16x16 macroblocks of four 8x8 blocks. Rows y0..y0+n. */
+static void fh_unblock_luma(uint8_t *dst, const uint8_t *src, unsigned w, unsigned h)
+{
+    const unsigned mbw = w / 16;
+
+    for (unsigned y = 0; y < h; y++) {
+        const unsigned mby = y / 16, by = (y % 16) / 8, r = y % 8;
+        uint8_t *d = dst + (size_t)y * w;
+
+        for (unsigned mbx = 0; mbx < mbw; mbx++)
+            for (unsigned bx = 0; bx < 2; bx++) {
+                const size_t off =
+                    (((size_t)(mby * mbw + mbx) * 4 + by * 2 + bx) * 8 + r) * 8;
+
+                memcpy(d + mbx * 16 + bx * 8, src + off, 8);
+            }
+    }
+}
+
+/* Format 1's chroma: per macroblock 16 bytes x 8 rows, two 8x8 blocks. */
+static void fh_unblock_chroma(uint8_t *dst, const uint8_t *src, unsigned w, unsigned rows)
+{
+    const unsigned mbw = w / 16;
+
+    for (unsigned y = 0; y < rows; y++) {
+        const unsigned mby = y / 8, r = y % 8;
+        uint8_t *d = dst + (size_t)y * w;
+
+        for (unsigned mbx = 0; mbx < mbw; mbx++)
+            for (unsigned bx = 0; bx < 2; bx++) {
+                const size_t off = (((size_t)(mby * mbw + mbx) * 2 + bx) * 8 + r) * 8;
+
+                memcpy(d + mbx * 16 + bx * 8, src + off, 8);
+            }
+    }
+}
 int hal_fs_set_frame_depth(void *ctx, int chn, int depth)
 {
     fh_state_t *st = fh_state(ctx);
@@ -717,16 +766,24 @@ int hal_fs_get_frame(void *ctx, int chn, void **frame_data, rss_frame_info_t *in
         st->grab_cap[chn] = need;
     }
     dst = st->grab_buf[chn];
-    for (y = 0; y < height; y++)
-        memcpy(dst + (size_t)y * width, py + (size_t)y * ys, width);
-    dst += (size_t)width * height;
-    for (y = 0; y < height / 2; y++)
-        memcpy(dst + (size_t)y * width, pc + (size_t)y * cs, width);
+    if (w[0] == 1 && width % 16 == 0 && w[1] == width * 16) {
+        /* block layout: the macroblock rows cover the padded height, so
+         * every picture row is in the buffer */
+        fh_unblock_luma(dst, py, width, height);
+        fh_unblock_chroma(dst + (size_t)width * height, pc, width, height / 2);
+    } else {
+        for (y = 0; y < height; y++)
+            memcpy(dst + (size_t)y * width, py + (size_t)y * ys, width);
+        dst += (size_t)width * height;
+        for (y = 0; y < height / 2; y++)
+            memcpy(dst + (size_t)y * width, pc + (size_t)y * cs, width);
+    }
 
     if (!st->grab_logged) {
         st->grab_logged = true;
-        HAL_LOG_INFO("fs %d: raw grab %ux%u (buffer %ux%u, format %u)", chn, width, height, width,
-                     w[3], w[0]);
+        HAL_LOG_INFO("fs %d: raw grab %ux%u (buffer %ux%u, format %u%s)", chn, width, height,
+                     width, w[3], w[0],
+                     w[0] == 1 && width % 16 == 0 && w[1] == width * 16 ? ", 16x16 blocks" : "");
     }
 
     memset(info, 0, sizeof(*info));
