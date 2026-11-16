@@ -663,14 +663,14 @@ int hal_fs_destroy_channel(void *ctx, int chn)
  * from PB4 frames, 2026-11-16). The luma is 16x16 macroblocks, left to
  * right and top to bottom, [1] = 10240 bytes per macroblock row; each
  * macroblock is four 8x8 blocks -- top left, top right, bottom left,
- * bottom right -- each 8 rows of 8 bytes. The chroma (NV12, UV
- * interleaved) follows the same scheme at half height: a macroblock's
- * 16 bytes x 8 rows as two 8x8 blocks, left then right. Copied straight,
+ * bottom right -- each 8 rows of 8 bytes. The chroma is planar inside
+ * each macroblock: its 8x8 U block, then its 8x8 V block (8 rows of the
+ * macroblock's 8 U, then of its 8 V samples), macroblocks in the same
+ * order at half height; they are interleaved back into NV12. Copied straight,
  * a frame was scrambled (motion only compares frames, so it got by;
  * positions, crops and save raw did not) and its last 8 rows were lost.
- * It is put back into raster order here. The luma layout is checked
- * against a reference frame; the chroma's against nothing yet (night
- * frames are grey).
+ * It is put back into raster order here; both planes checked against a
+ * daylight PB4 frame decoded by hand (2026-11-16).
  */
 
 /* Format 1's luma: 16x16 macroblocks of four 8x8 blocks. Rows y0..y0+n. */
@@ -692,7 +692,8 @@ static void fh_unblock_luma(uint8_t *dst, const uint8_t *src, unsigned w, unsign
     }
 }
 
-/* Format 1's chroma: per macroblock 16 bytes x 8 rows, two 8x8 blocks. */
+/* Format 1's chroma: per macroblock an 8x8 U block then an 8x8 V block,
+ * written out as NV12's interleaved UV rows. */
 static void fh_unblock_chroma(uint8_t *dst, const uint8_t *src, unsigned w, unsigned rows)
 {
     const unsigned mbw = w / 16;
@@ -701,12 +702,16 @@ static void fh_unblock_chroma(uint8_t *dst, const uint8_t *src, unsigned w, unsi
         const unsigned mby = y / 8, r = y % 8;
         uint8_t *d = dst + (size_t)y * w;
 
-        for (unsigned mbx = 0; mbx < mbw; mbx++)
-            for (unsigned bx = 0; bx < 2; bx++) {
-                const size_t off = (((size_t)(mby * mbw + mbx) * 2 + bx) * 8 + r) * 8;
+        for (unsigned mbx = 0; mbx < mbw; mbx++) {
+            const uint8_t *u = src + (size_t)(mby * mbw + mbx) * 128 + r * 8;
+            const uint8_t *v = u + 64;
+            uint8_t *o = d + mbx * 16;
 
-                memcpy(d + mbx * 16 + bx * 8, src + off, 8);
+            for (unsigned i = 0; i < 8; i++) {
+                o[2 * i] = u[i];
+                o[2 * i + 1] = v[i];
             }
+        }
     }
 }
 int hal_fs_set_frame_depth(void *ctx, int chn, int depth)
