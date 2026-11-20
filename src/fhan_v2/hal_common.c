@@ -370,6 +370,7 @@ fail:
 static void fh_teardown(fh_state_t *st)
 {
 #ifdef HAL_MODULE_VIDEO
+    fh_osd_deinit(); /* the plane off the picture while the pipeline still runs */
     fh_pipe_stop(st);
 #endif
     if (st->sys_inited) {
@@ -600,6 +601,20 @@ static const rss_hal_ops_t g_ops = {
     .enc_get_jpeg_qp = hal_enc_get_jpeg_qp,
     .enc_get_fps = hal_enc_get_fps,
     .enc_get_avg_bitrate = hal_enc_get_avg_bitrate,
+
+    /* OSD: one ARGB1555 logo plane on the main stream (fh_osd.c) */
+    .osd_set_pool_size = hal_osd_set_pool_size,
+    .osd_create_group = hal_osd_create_group,
+    .osd_destroy_group = hal_osd_destroy_group,
+    .osd_create_region = hal_osd_create_region,
+    .osd_destroy_region = hal_osd_destroy_region,
+    .osd_register_region = hal_osd_register_region,
+    .osd_unregister_region = hal_osd_unregister_region,
+    .osd_set_region_attr = hal_osd_set_region_attr,
+    .osd_update_region_data = hal_osd_update_region_data,
+    .osd_show_region = hal_osd_show_region,
+    .osd_start = hal_osd_start,
+    .osd_stop = hal_osd_stop,
 
     .isp_get_exposure = hal_isp_get_exposure,
     .isp_set_running_mode = hal_isp_set_running_mode,

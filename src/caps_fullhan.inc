@@ -26,7 +26,9 @@ const rss_hal_caps_t g_hal_caps = {
      * treats the encoder as owning the whole capture path and never binds
      * (bench, 2026-11-05: channels created, never bound, no frames). */
     .has_framesource = true,
-    .has_osd = false,
+    /* One logo plane on the main stream, drawn by the CPU (fh_osd.c);
+     * the sub-stream's regions are not drawn. */
+    .has_osd = true,
     .has_ivs = false,
 
     .has_jpeg = true,
@@ -45,8 +47,8 @@ const rss_hal_caps_t g_hal_caps = {
     .max_fs_channels = 3,
     .max_enc_pixel_rate = 0,
 
-    .max_osd_regions = 0,
-    .max_osd_groups = 0,
+    .max_osd_regions = 16,
+    .max_osd_groups = 2,
 
     .uses_xburst2 = false,
     .uses_new_sdk = false,
