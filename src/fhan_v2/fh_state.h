@@ -115,6 +115,22 @@ static inline fh_state_t *fh_state(void *ctx)
     return c ? (fh_state_t *)c->platform : NULL;
 }
 
+/* hal_common.c: checks the mmap/__assert bridge is exported (fh_audio.c too). */
+FH_LOCAL void fh_check_exports(void);
+
+/* fh_audio.c */
+FH_LOCAL int hal_audio_init(void *ctx, const rss_audio_config_t *cfg);
+FH_LOCAL int hal_audio_deinit(void *ctx);
+FH_LOCAL int hal_audio_read_frame(void *ctx, int dev, int chn, rss_audio_frame_t *frame, bool block);
+FH_LOCAL int hal_audio_release_frame(void *ctx, int dev, int chn, rss_audio_frame_t *frame);
+FH_LOCAL int hal_audio_set_volume(void *ctx, int dev, int chn, int vol);
+FH_LOCAL int hal_audio_get_volume(void *ctx, int dev, int chn, int *vol);
+FH_LOCAL int hal_audio_set_gain(void *ctx, int dev, int chn, int gain);
+FH_LOCAL int hal_audio_get_gain(void *ctx, int dev, int chn, int *gain);
+FH_LOCAL int hal_audio_set_mute(void *ctx, int dev, int chn, int mute);
+FH_LOCAL int hal_audio_enable_hpf(void *ctx);
+FH_LOCAL int hal_audio_disable_hpf(void *ctx);
+
 #ifdef HAL_MODULE_VIDEO
 /* fh_pipeline.c */
 FH_LOCAL int fh_pipe_prepare(fh_state_t *st, const rss_sensor_config_t *snr);

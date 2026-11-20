@@ -42,5 +42,6 @@ VIDEO_SRCS := $(BACKEND_DIR)/fh_pipeline.c \
               $(BACKEND_DIR)/fh_encoder.c \
               $(BACKEND_DIR)/fh_crash.c \
               src/hal_gpio.c
-AUDIO_SRCS :=
+# Phase 6: the mic (libacw_mpi.so via the ARC core), for rad.
+AUDIO_SRCS := $(BACKEND_DIR)/fh_audio.c
 endif
