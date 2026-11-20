@@ -41,6 +41,12 @@
 
 #define _GNU_SOURCE
 
+/* A video-module file: fh_state.h's pipeline and encoder fields are behind
+ * this, and the generic %.o rule does not pass -DHAL_MODULE_VIDEO. */
+#ifndef HAL_MODULE_VIDEO
+#define HAL_MODULE_VIDEO
+#endif
+
 #include "fh_state.h"
 
 #include <dlfcn.h>
