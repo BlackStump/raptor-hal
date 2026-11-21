@@ -61,5 +61,6 @@ $(BACKEND_DIR)/xm_encoder.o: CFLAGS += -I$(XM_SDK)/libxmvenc
 # xm_isp.c alone speaks the ISP library's headers (isp/include/isp), which
 # carry their own XM_* types; they stay out of every other object.
 $(BACKEND_DIR)/xm_isp.o: CFLAGS += -I$(XM_SDK)/isp/include/isp -I$(XM_SDK)/isp/include/xm
-AUDIO_SRCS :=
+# The mic: /dev/ai read directly (xm_i2s.ko + acodec.ko), for rad.
+AUDIO_SRCS := $(BACKEND_DIR)/xm_audio.c
 endif

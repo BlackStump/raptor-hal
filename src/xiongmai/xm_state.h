@@ -207,6 +207,19 @@ int hal_osd_start(void *ctx, int grp);
 int hal_osd_stop(void *ctx, int grp);
 void xm_osd_deinit(void);
 
+/* xm_audio.c: the mic on /dev/ai, for rad */
+int hal_audio_init(void *ctx, const rss_audio_config_t *cfg);
+int hal_audio_deinit(void *ctx);
+int hal_audio_read_frame(void *ctx, int dev, int chn, rss_audio_frame_t *frame, bool block);
+int hal_audio_release_frame(void *ctx, int dev, int chn, rss_audio_frame_t *frame);
+int hal_audio_set_volume(void *ctx, int dev, int chn, int vol);
+int hal_audio_get_volume(void *ctx, int dev, int chn, int *vol);
+int hal_audio_set_gain(void *ctx, int dev, int chn, int gain);
+int hal_audio_get_gain(void *ctx, int dev, int chn, int *gain);
+int hal_audio_set_mute(void *ctx, int dev, int chn, int mute);
+int hal_audio_enable_hpf(void *ctx);
+int hal_audio_disable_hpf(void *ctx);
+
 /* xm_isp.c -- the ISP library's attributes, kept out of the MPI headers'
  * translation unit (the two header sets are not meant to meet). */
 int xm_isp_exposure_defaults(void);

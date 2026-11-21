@@ -413,6 +413,22 @@ static const rss_hal_ops_t g_ops = {
     .gpio_get = hal_gpio_get,
     .ircut_set = hal_ircut_set,
 #endif
+
+#ifdef HAL_MODULE_AUDIO
+    /* The mic on /dev/ai (xm_audio.c): 8 kHz mono, software volume and
+     * hum filter. No AO, NS, AGC or AEC. */
+    .audio_init = hal_audio_init,
+    .audio_deinit = hal_audio_deinit,
+    .audio_read_frame = hal_audio_read_frame,
+    .audio_release_frame = hal_audio_release_frame,
+    .audio_set_volume = hal_audio_set_volume,
+    .audio_get_volume = hal_audio_get_volume,
+    .audio_set_gain = hal_audio_set_gain,
+    .audio_get_gain = hal_audio_get_gain,
+    .audio_set_mute = hal_audio_set_mute,
+    .audio_enable_hpf = hal_audio_enable_hpf,
+    .audio_disable_hpf = hal_audio_disable_hpf,
+#endif
 };
 
 /* ================================================================
